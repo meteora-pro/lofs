@@ -2,7 +2,7 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-concept-orange.svg)](#status)
 
 **LOFS** is a lightweight, rootless, OCI-backed shared **workspace** primitive for multi-agent AI systems. It gives agents a real POSIX filesystem they can mount, work in, and commit back as immutable layers — with support for fork/merge, ephemeral TTL, and LLM-driven merge of concurrent changes.
@@ -135,7 +135,7 @@ If you're curious about the thinking that led here, read the ADRs and RESEARCH d
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache 2.0 — see [LICENSE](LICENSE).
 
 ## Part of Meteora
 

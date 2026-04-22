@@ -2,7 +2,7 @@
 
 [English](README.md) | [Русский](README.ru.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-concept-orange.svg)](#статус)
 
 **LOFS** — легковесный rootless-бэкенд для **shared workspace** агентов AI, поверх OCI-реестров. Даёт агентам обычную POSIX-файловую систему, которую можно смонтировать, работать в ней и зафиксировать изменения как immutable-слой — с поддержкой fork/merge, ephemeral TTL и LLM-driven merge для конкурентных правок.
@@ -135,7 +135,7 @@ lofs.unmount({
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE).
+Apache 2.0 — см. [LICENSE](LICENSE).
 
 ## Часть Meteora
 

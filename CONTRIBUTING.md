@@ -75,4 +75,4 @@ If you find a security issue, email `ai-dev@meteora.pro` privately. Do not open 
 
 ## License
 
-By contributing you agree that your contributions are licensed under the [MIT License](LICENSE).
+By contributing you agree that your contributions are licensed under the [Apache License 2.0](LICENSE).
