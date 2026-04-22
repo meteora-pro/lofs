@@ -1,0 +1,26 @@
+[package]
+name = "lofs-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MCP server exposing the LOFS four-tool surface (create / list / mount / unmount)"
+
+[[bin]]
+name = "lofs-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lofs-core = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# rmcp = { workspace = true }   # enable once Phase 2 MCP server lands

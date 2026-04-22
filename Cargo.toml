@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lofs-core",
+    "crates/lofs-mcp",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/meteora-pro/lofs"
+authors = ["Meteora Pro <ai-dev@meteora.pro>"]
+
+[workspace.dependencies]
+# --- Local crates ---
+lofs-core = { path = "crates/lofs-core" }
+
+# --- OCI / registry ---
+# Pinned conservative per RESEARCH-005 (oci-client pre-1.0, breaking between minor).
+oci-spec = "0.8"
+oci-client = "=0.16"
+
+# --- FUSE + rootless overlay (Linux-first) ---
+# libfuse-fs is beta / single-maintainer — pin strict and monitor.
+fuser = "0.17"
+fuse3 = "1.91"
+# libfuse-fs = "0.3"    # enable when we wire the overlay adapter
+
+# --- Content addressing + storage ---
+blake3 = "1.5"
+ciborium = "0.2"
+opendal = { version = "0.50", default-features = false, features = ["services-fs"] }
+
+# --- Compression ---
+# Important: avoid tokio-tar forks (CVE-2025-62518 TARmageddon). Use sync tar + spawn_blocking.
+tar = "0.4"
+zstd = "0.13"
+async-compression = { version = "0.4", features = ["zstd", "tokio"] }
+
+# --- Low-level Linux (rootless overlay + user namespaces) ---
+nix = { version = "0.28", features = ["mount", "sched", "user", "process"] }
+caps = "0.5"
+sys-mount = "3"
+
+# --- Runtime / async ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "process"] }
+
+# --- Serialization + error handling ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+
+# --- Observability ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- MCP ---
+# rmcp = "0.2"          # enable once MCP plugin lands
+
+# --- Utilities ---
+hex = "0.4"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

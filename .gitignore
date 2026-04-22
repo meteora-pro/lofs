@@ -1,0 +1,24 @@
+# Rust
+target
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Docs build
+docs/doc_build/
+docs/node_modules/
+
+# Claude Code local state
+.claude/projects/
+
+# Misc scratch
+/tmp
+/scratch

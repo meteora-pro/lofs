@@ -1,0 +1,51 @@
+[package]
+name = "lofs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core types, storage abstractions and overlay/OCI primitives for LOFS (Layered Overlay File System)"
+
+[dependencies]
+# Storage + hashing
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+opendal = { workspace = true }
+
+# OCI
+oci-spec = { workspace = true }
+oci-client = { workspace = true }
+
+# Compression + tar
+# NOTE: always use sync `tar` — tokio-tar forks had CVE-2025-62518 (TARmageddon).
+tar = { workspace = true }
+zstd = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Errors + observability
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# --- Linux-only: rootless overlay mount + FUSE + capabilities ---
+# FUSE / mount syscalls / user-namespace manipulation only compile on Linux.
+# On other platforms `lofs-core` builds with just the OCI / storage layers;
+# mount operations return an "unsupported platform" error at runtime.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { workspace = true }
+nix = { workspace = true }
+caps = { workspace = true }
+sys-mount = { workspace = true }
+# libfuse-fs = { workspace = true }   # enable when the overlay adapter lands
