@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/lofs-core",
     "crates/lofs-mcp",
+    "crates/lofs-cli",
 ]
 
 [workspace.package]
@@ -63,6 +64,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4"
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+directories = "5"
+
+# --- HTTP client for raw /v2/_catalog + DELETE (things oci-client does not cover) ---
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+
+# --- CLI ---
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- Test infrastructure ---
+testcontainers = "0.23"
 
 [profile.release]
 lto = "thin"

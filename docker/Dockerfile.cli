@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for the `lofs` CLI.
+#
+#   docker build -f docker/Dockerfile.cli -t lofs-cli:dev .
+#
+# The runtime image is Debian slim + CA certificates — enough for the CLI
+# to speak TLS to a remote OCI registry. Mount or FUSE capabilities are
+# not wired here; that's Phase 1.2 scope.
+
+FROM rust:1.86-slim-bookworm AS builder
+
+# `rustls` takes care of TLS, so we don't need `libssl-dev`. `pkg-config`
+# is still handy for downstream crates that probe the system.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        pkg-config \
+        ca-certificates \
+        build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy the whole workspace. Simple beats cache-trickery here — the whole
+# tree is small (<1 MB of source), and Docker layer caching still kicks
+# in when Cargo.lock + source files haven't changed.
+COPY . .
+
+# Linux-only deps (fuser, nix, caps, sys-mount) are cfg-gated inside
+# lofs-core and only compile on target_os = "linux" — they'll pull in
+# here as expected.
+RUN cargo build --release --locked -p lofs-cli
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --shell /bin/bash lofs
+
+COPY --from=builder /build/target/release/lofs /usr/local/bin/lofs
+
+USER lofs
+WORKDIR /home/lofs
+
+ENTRYPOINT ["lofs"]
+CMD ["doctor"]

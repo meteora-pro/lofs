@@ -1,7 +1,10 @@
-//! `lofs-mcp` — MCP server exposing the LOFS four-tool surface.
+//! `lofs-mcp` — MCP server exposing the LOFS four-tool surface
+//! (`lofs.create / list / mount / unmount`).
 //!
-//! Concept scaffold only. The real server is planned for Phase 2 (see
-//! [ADR-001](../../../docs/architecture/adr/ADR-001-lofs.md)).
+//! Concept scaffold only. The real server lands in Phase 1.1 / 1.2 —
+//! see [ADR-001](../../../docs/architecture/adr/ADR-001-lofs.md),
+//! [ADR-002](../../../docs/architecture/adr/ADR-002-cooperative-coordination.md),
+//! and [IMPLEMENTATION_PLAN.md](../../../docs/IMPLEMENTATION_PLAN.md).
 
 #![warn(clippy::all)]
 

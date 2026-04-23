@@ -5,47 +5,60 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Core types, storage abstractions and overlay/OCI primitives for LOFS (Layered Overlay File System)"
+description = "Core types, OCI-backed persistence, and overlay primitives for LOFS (Layered Overlay File System)"
 
 [dependencies]
-# Storage + hashing
-blake3 = { workspace = true }
-ciborium = { workspace = true }
-opendal = { workspace = true }
-
-# OCI
-oci-spec = { workspace = true }
+# OCI wire — what we use today.
 oci-client = { workspace = true }
 
-# Compression + tar
-# NOTE: always use sync `tar` — tokio-tar forks had CVE-2025-62518 (TARmageddon).
-tar = { workspace = true }
-zstd = { workspace = true }
-
-# Async runtime
+# Async runtime (oci-client + reqwest are both tokio-based).
 tokio = { workspace = true }
 
-# Serialization
+# HTTP client for the bits oci-client doesn't expose (catalog walk, manifest DELETE).
+reqwest = { workspace = true }
+
+# Serialization + error handling.
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Errors + observability
 thiserror = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
 
-# Utilities
-hex = { workspace = true }
+# Utilities.
 uuid = { workspace = true }
 chrono = { workspace = true }
 
-# --- Linux-only: rootless overlay mount + FUSE + capabilities ---
-# FUSE / mount syscalls / user-namespace manipulation only compile on Linux.
-# On other platforms `lofs-core` builds with just the OCI / storage layers;
-# mount operations return an "unsupported platform" error at runtime.
-[target.'cfg(target_os = "linux")'.dependencies]
-fuser = { workspace = true }
-nix = { workspace = true }
-caps = { workspace = true }
-sys-mount = { workspace = true }
-# libfuse-fs = { workspace = true }   # enable when the overlay adapter lands
+# --- DEFERRED (re-enable as the Phase 1.2+ backend lands) -----------------
+#
+# Storage + hashing (snapshot digest, canonical CBOR, blob cache):
+#   blake3 = { workspace = true }
+#   ciborium = { workspace = true }
+#   opendal = { workspace = true }
+#
+# Compression + tar packing (commit-time layer builder):
+#   tar = { workspace = true }                # sync — never tokio-tar (CVE-2025-62518)
+#   zstd = { workspace = true }
+#
+# Observability helpers inside core:
+#   anyhow = { workspace = true }
+#   tracing = { workspace = true }
+#   hex = { workspace = true }
+#
+# Linux-only overlay / FUSE / user-namespace syscalls (Phase 1.2 mount backend):
+# [target.'cfg(target_os = "linux")'.dependencies]
+#   fuser = { workspace = true }
+#   nix = { workspace = true }
+#   caps = { workspace = true }
+#   sys-mount = { workspace = true }
+#
+# Each of the above pulls in something non-trivial (system libs, C/C++ codegen,
+# large transitive trees) — gating them to the phase that actually exercises
+# the feature keeps MVP builds fast and the Docker image slim.
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "process", "time"] }
+futures = "0.3"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "registry_comparison"
+harness = false
+path = "benches/registry_comparison.rs"

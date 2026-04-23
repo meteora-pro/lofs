@@ -1,0 +1,81 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # Zot — OCI registry v1.1, Apache 2.0, Rust-friendly, full Referrers API.
+  # Project: https://zotregistry.dev/
+  # ---------------------------------------------------------------------------
+  zot:
+    image: ghcr.io/project-zot/zot:v2.1.2
+    container_name: lofs-zot
+    restart: unless-stopped
+    ports:
+      - "5100:5000"
+    volumes:
+      - zot-data:/var/lib/registry
+      - ./zot-config.json:/etc/zot/config.json:ro
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/v2/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # CNCF Distribution (a.k.a. "the official docker registry") — v3, OCI 1.1.
+  # Reference implementation, industry baseline.
+  # Project: https://distribution.github.io/distribution/
+  # ---------------------------------------------------------------------------
+  distribution:
+    image: distribution/distribution:3.0.0
+    container_name: lofs-distribution
+    restart: unless-stopped
+    ports:
+      - "5101:5000"
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+      REGISTRY_LOG_LEVEL: "info"
+    volumes:
+      - distribution-data:/var/lib/registry
+    networks:
+      - default
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5000/v2/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Optional: the LOFS CLI, built from the workspace and run inside the same
+  # compose network so it can talk to `zot` and `distribution` by hostname.
+  #
+  # Activate with `--profile tools`:
+  #
+  #   docker compose --profile tools build cli
+  #   docker compose --profile tools run --rm cli doctor
+  #   docker compose --profile tools run --rm cli create demo --ttl-days 7
+  # ---------------------------------------------------------------------------
+  cli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cli
+    image: lofs-cli:dev
+    profiles: ["tools"]
+    networks:
+      - default
+    environment:
+      # Default to Zot inside the compose network.
+      LOFS_REGISTRY: http://zot:5000
+    # No long-running server — we exec a single command per `run`.
+
+networks:
+  # Named network so callers outside compose (`docker run --network …`)
+  # can join it without guessing the compose-generated name.
+  default:
+    name: lofs-net
+
+volumes:
+  zot-data:
+  distribution-data:

@@ -4,30 +4,196 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+  RUSTFLAGS: -Dwarnings
+  RUST_LOG: warn
 
 jobs:
-  check:
-    name: Check & Lint
+  # --------------------------------------------------------------------------
+  # fmt — fast gate, runs on every push/PR before anything else.
+  # --------------------------------------------------------------------------
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-  test:
-    name: Test
+  # --------------------------------------------------------------------------
+  # clippy — lints with -Dwarnings, all crates + all targets (benches, tests).
+  #
+  # We install `fuse3` + `libfuse3-dev` even though the FUSE backend isn't
+  # wired yet. The Linux-only dependencies (`fuser`, `libfuse-fs`) are
+  # pulled in through `[target.'cfg(target_os = "linux")'.dependencies]` in
+  # `lofs-core/Cargo.toml`; having the system headers available keeps the
+  # matrix future-proof for Phase 1.2.
+  # --------------------------------------------------------------------------
+  clippy:
+    name: Clippy
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        # L0 builds cleanly with no extra apt packages — rustls does TLS,
+        # OCI deps are pure-Rust. Phase 1.2 will reintroduce `fuse3` +
+        # `libfuse3-dev` once the overlay backend lands.
+        run: sudo apt-get update
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets
+
+  # --------------------------------------------------------------------------
+  # test-unit — cross-platform lib tests (no network, no Docker).
+  #
+  # Hits all five target platforms that we ship release binaries for:
+  #   Linux x86_64 (gnu), Linux ARM64 (gnu), macOS x86_64, macOS ARM64,
+  #   Windows x86_64 (msvc).
+  #
+  # On Linux the FUSE system deps only matter for future mount code; the
+  # current lib tests don't exercise any syscalls.
+  # --------------------------------------------------------------------------
+  test-unit:
+    name: Unit Tests (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh apt index
+        if: runner.os == 'Linux'
+        # No extra packages yet — Phase 1.2 adds fuse3 / libfuse3-dev.
+        run: sudo apt-get update
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: unit-${{ matrix.target }}
+      - name: Run unit tests
+        run: cargo test --workspace --lib
+
+  # --------------------------------------------------------------------------
+  # test-e2e — spins up Zot + CNCF Distribution via docker compose and runs
+  # the integration suite. Linux-only: Windows/macOS GitHub runners don't
+  # have a usable Docker engine for bringing containers up.
+  # --------------------------------------------------------------------------
+  test-e2e:
+    name: E2E Tests (Linux + Docker)
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
-      - run: cargo test --workspace
+        with:
+          key: e2e-x86_64-unknown-linux-gnu
+
+      - name: Start registries
+        run: make dev-up
+
+      - name: Run e2e suite (Zot + Distribution, both covered)
+        run: make test-e2e
+        env:
+          LOFS_TEST_ZOT: http://localhost:5100
+          LOFS_TEST_DISTRIBUTION: http://localhost:5101
+
+      - name: Dump registry logs on failure
+        if: failure()
+        run: make dev-logs
+
+      - name: Stop registries
+        if: always()
+        run: make dev-down
+
+  # --------------------------------------------------------------------------
+  # docker-cli — build the Linux release image, then smoke-test the binary
+  # from inside a container against a sibling Zot on the same network.
+  # Proves end-to-end that the Linux binary itself (not just the source)
+  # works in a containerised environment.
+  # --------------------------------------------------------------------------
+  docker-cli:
+    name: Docker CLI (Linux image + smoke test)
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Start registries
+        run: make dev-up
+
+      - name: Build and smoke-test lofs CLI inside Docker
+        run: make docker-test-cli
+
+      - name: Stop registries
+        if: always()
+        run: make dev-down
+
+  # --------------------------------------------------------------------------
+  # build — release binaries for the five supported platforms. Published as
+  # workflow artifacts; Release workflow re-uses the same matrix.
+  # --------------------------------------------------------------------------
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    needs: [fmt, clippy]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refresh apt index
+        if: runner.os == 'Linux'
+        # No extra packages yet — Phase 1.2 adds fuse3 / libfuse3-dev.
+        run: sudo apt-get update
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-${{ matrix.target }}
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }} -p lofs-cli
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lofs-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/lofs
+            target/${{ matrix.target }}/release/lofs.exe
+          if-no-files-found: ignore

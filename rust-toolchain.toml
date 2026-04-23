@@ -1,0 +1,13 @@
+# Pin the toolchain so every developer (and every CI matrix runner)
+# picks up the same stable rustc + clippy + rustfmt.
+#
+# We track `stable` deliberately — several transitive dependencies
+# (e.g. the `icu_*` family pulled in by `url`) bump their MSRV every
+# few releases. Freezing to an older point release has caused Docker
+# builds to fail in the past (rustc 1.85.1 -> icu_* requires 1.86);
+# `stable` keeps us on the latest release without manual nudges.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
