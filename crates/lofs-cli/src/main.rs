@@ -17,7 +17,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use lofs_core::bucket::{Bucket, BucketName, BucketStatus};
 use lofs_core::error::LofsError;
-use lofs_core::oci::OciRegistry;
+use lofs_core::oci::{OciRegistry, driver_by_name_or_auto};
 use lofs_core::{NewBucket, VERSION};
 use serde::Serialize;
 
@@ -58,6 +58,14 @@ struct Cli {
         hide_env_values = true
     )]
     token: Option<String>,
+
+    /// Registry flavour driver. `auto` (default) picks from the hostname —
+    /// known hosts: `registry.gitlab.com` and `*.gitlab.*` → `gitlab`.
+    /// Anything else → `generic` (OCI 1.1 baseline — Zot, Distribution, Harbor).
+    /// Use an explicit value to force a driver on a self-hosted install
+    /// with a non-obvious hostname.
+    #[arg(long, global = true, env = "LOFS_DRIVER", default_value = "auto")]
+    driver: String,
 
     /// Increase log verbosity (`-v`, `-vv`, `-vvv`).
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
@@ -238,6 +246,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         registry: cli.registry,
         username: cli.username,
         token: cli.token,
+        driver: cli.driver,
     };
     match cli.cmd {
         Cmd::Doctor => cmd_doctor(creds).await,
@@ -254,11 +263,25 @@ struct Creds {
     registry: String,
     username: Option<String>,
     token: Option<String>,
+    driver: String,
 }
 
 fn open_registry(creds: &Creds) -> anyhow::Result<OciRegistry> {
-    let reg = OciRegistry::anonymous(&creds.registry)
+    // Parse just enough of the URL to resolve the driver by hostname,
+    // then hand it to OciRegistry alongside the full URL.
+    let host = host_from_url(&creds.registry).with_context(|| {
+        format!(
+            "parse registry URL `{}` for driver detection",
+            creds.registry
+        )
+    })?;
+    let driver = driver_by_name_or_auto(&creds.driver, &host)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("resolve --driver={}", creds.driver))?;
+
+    let reg = OciRegistry::anonymous_with_driver(&creds.registry, driver)
         .with_context(|| format!("configure OCI registry at {}", creds.registry))?;
+
     let reg = match (creds.username.as_deref(), creds.token.as_deref()) {
         (Some(user), Some(token)) => reg.with_basic(user, token),
         (None, Some(token)) => reg.with_bearer(token),
@@ -275,6 +298,18 @@ fn open_registry(creds: &Creds) -> anyhow::Result<OciRegistry> {
     Ok(reg)
 }
 
+fn host_from_url(url: &str) -> anyhow::Result<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| anyhow::anyhow!("URL must start with http:// or https://"))?;
+    let trimmed = rest.trim_end_matches('/');
+    Ok(match trimmed.split_once('/') {
+        Some((h, _)) => h.to_string(),
+        None => trimmed.to_string(),
+    })
+}
+
 async fn cmd_doctor(creds: Creds) -> anyhow::Result<()> {
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -285,10 +320,23 @@ async fn cmd_doctor(creds: Creds) -> anyhow::Result<()> {
 
     match open_registry(&creds) {
         Ok(reg) => {
+            println!(
+                "driver:     {} ({})",
+                reg.driver().name(),
+                reg.driver().description()
+            );
+            println!("mode:       {:?}", reg.mode());
             println!("auth:       {}", reg.auth_label());
             if !reg.path_prefix().is_empty() {
                 println!("prefix:     {}", reg.path_prefix());
             }
+            let caps = reg.driver();
+            println!(
+                "caps:       artifactType={}, nativeDelete={}, catalog={}",
+                caps.supports_artifact_type(),
+                caps.supports_native_delete(),
+                caps.catalog_supported()
+            );
             match reg.ping().await {
                 Ok(()) => match reg.list_buckets().await {
                     Ok(buckets) => {

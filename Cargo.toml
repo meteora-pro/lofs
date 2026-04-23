@@ -69,6 +69,13 @@ directories = "5"
 # --- HTTP client for raw /v2/_catalog + DELETE (things oci-client does not cover) ---
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 
+# --- async-trait — boxing of async-fn-in-trait so we can keep dyn RegistryDriver ---
+async-trait = "0.1"
+
+# --- raw HTTP helpers used when we need to synthesise a Response ---
+http = "1"
+bytes = "1"
+
 # --- CLI ---
 clap = { version = "4", features = ["derive", "env"] }
 

@@ -17,6 +17,13 @@ tokio = { workspace = true }
 # HTTP client for the bits oci-client doesn't expose (catalog walk, manifest DELETE).
 reqwest = { workspace = true }
 
+# dyn-safe async-fn-in-trait (until Rust stabilises it for object-safe traits).
+async-trait = { workspace = true }
+
+# Low-level Response building for the GitLab driver fallback.
+http = { workspace = true }
+bytes = { workspace = true }
+
 # Serialization + error handling.
 serde = { workspace = true }
 serde_json = { workspace = true }

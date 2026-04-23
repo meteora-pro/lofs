@@ -43,13 +43,14 @@
 
 use std::collections::BTreeMap;
 
+use oci_client::Reference;
 use oci_client::client::{Client, ClientConfig};
 use oci_client::errors::{OciDistributionError, OciErrorCode};
 use oci_client::secrets::RegistryAuth;
-use oci_client::{Reference, RegistryOperation};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
+use super::driver::{DeleteContext, DriverRef, RegistryDriver, detect_from_url};
 use super::manifest::{
     BucketConfig, ListedManifest, bucket_annotations, bucket_from_annotations, build_pair,
 };
@@ -101,7 +102,7 @@ pub struct OciRegistry {
     /// Optional path prefix, no leading/trailing slashes, empty when the
     /// caller passed just a bare host URL.
     path_prefix: String,
-    mode: RepoMode,
+    driver: DriverRef,
     auth: RegistryAuth,
 }
 
@@ -111,16 +112,32 @@ impl std::fmt::Debug for OciRegistry {
             .field("origin", &self.origin)
             .field("registry_host", &self.registry_host)
             .field("path_prefix", &self.path_prefix)
-            .field("mode", &self.mode)
+            .field("driver", &self.driver.name())
+            .field("mode", &self.mode())
             .field("auth", &auth_shape(&self.auth))
             .finish()
     }
 }
 
 impl OciRegistry {
-    /// Build an anonymous-auth client pointing at `base_url`.
+    /// Build an anonymous-auth client pointing at `base_url`. The
+    /// [`RegistryDriver`] is auto-detected from the hostname — use
+    /// [`Self::anonymous_with_driver`] to force a specific one.
     pub fn anonymous(base_url: impl AsRef<str>) -> LofsResult<Self> {
         let parsed = ParsedUrl::parse(base_url.as_ref())?;
+        let driver = detect_from_url(&parsed.host);
+        Self::build(parsed, driver)
+    }
+
+    /// Build an anonymous-auth client with an explicit driver (override
+    /// auto-detection — e.g. when the user passes `--driver gitlab` on a
+    /// self-hosted installation at a non-obvious hostname).
+    pub fn anonymous_with_driver(base_url: impl AsRef<str>, driver: DriverRef) -> LofsResult<Self> {
+        let parsed = ParsedUrl::parse(base_url.as_ref())?;
+        Self::build(parsed, driver)
+    }
+
+    fn build(parsed: ParsedUrl, driver: DriverRef) -> LofsResult<Self> {
         let protocol = if parsed.https {
             oci_client::client::ClientProtocol::Https
         } else {
@@ -130,18 +147,13 @@ impl OciRegistry {
             protocol,
             ..Default::default()
         });
-        let mode = if parsed.path_prefix.is_empty() {
-            RepoMode::Separate
-        } else {
-            RepoMode::Shared
-        };
         Ok(Self {
             client,
             http: reqwest::Client::new(),
             origin: parsed.origin,
             registry_host: parsed.host,
             path_prefix: parsed.path_prefix,
-            mode,
+            driver,
             auth: RegistryAuth::Anonymous,
         })
     }
@@ -177,9 +189,14 @@ impl OciRegistry {
         &self.path_prefix
     }
 
-    /// Repo-addressing mode selected from the base URL.
+    /// Repo-addressing mode selected by the driver from the base URL.
     pub fn mode(&self) -> RepoMode {
-        self.mode
+        self.driver.effective_repo_mode(&self.path_prefix)
+    }
+
+    /// The active [`RegistryDriver`] — name, capability flags, etc.
+    pub fn driver(&self) -> &dyn RegistryDriver {
+        self.driver.as_ref()
     }
 
     /// Short identifier describing which auth mode is active — `"anonymous"`,
@@ -256,7 +273,7 @@ impl OciRegistry {
 
     /// Enumerate the raw bucket manifest descriptors.
     pub async fn list_bucket_manifests(&self) -> LofsResult<Vec<ListedManifest>> {
-        match self.mode {
+        match self.mode() {
             RepoMode::Separate => self.list_manifests_separate().await,
             RepoMode::Shared => self.list_manifests_shared().await,
         }
@@ -277,13 +294,16 @@ impl OciRegistry {
                 }
             })?;
 
-        let url = format!(
-            "{}/v2/{}/manifests/{}",
-            self.origin,
-            reference.repository(),
-            digest
-        );
-        let res = self.authorised_delete(&url, &reference).await?;
+        let ctx = DeleteContext {
+            http: &self.http,
+            oci: &self.client,
+            origin: &self.origin,
+            reference: &reference,
+            digest: &digest,
+            auth: &self.auth,
+            path_prefix: &self.path_prefix,
+        };
+        let res = self.driver.delete_manifest(&ctx).await?;
         match res.status() {
             StatusCode::ACCEPTED | StatusCode::OK | StatusCode::NO_CONTENT => Ok(()),
             StatusCode::NOT_FOUND => Err(LofsError::NotFound(display_bucket(name, org))),
@@ -327,7 +347,7 @@ impl OciRegistry {
             None => PERSONAL_ORG_SEGMENT,
         };
 
-        let (repo, tag) = match self.mode {
+        let (repo, tag) = match self.mode() {
             RepoMode::Separate => {
                 let repo = format!("{NAMESPACE}/{org_seg}/{name}");
                 (repo, HEAD_TAG.to_string())
@@ -498,37 +518,6 @@ impl OciRegistry {
         let req = self.http.get(url);
         let req = apply_auth(req, &self.auth);
         Ok(req.send().await?)
-    }
-
-    /// DELETE with OCI token-exchange awareness: if the registry replies
-    /// 401 + `WWW-Authenticate: Bearer realm=…`, exchange credentials for a
-    /// JWT via `oci-client::auth()` and retry. Local Zot / Distribution
-    /// accept Basic directly and never hit the retry branch; GitLab CR,
-    /// Harbor and other project-scoped registries always do.
-    async fn authorised_delete(
-        &self,
-        url: &str,
-        reference: &Reference,
-    ) -> LofsResult<reqwest::Response> {
-        let first = apply_auth(self.http.delete(url), &self.auth).send().await?;
-        if first.status() != StatusCode::UNAUTHORIZED {
-            return Ok(first);
-        }
-
-        // Token-exchange fallback. `client.auth()` performs the Bearer
-        // challenge → JWT-fetch round-trip with our cached `RegistryAuth`;
-        // the returned token is scoped to the push op which GitLab grants
-        // `delete` under (write_registry covers both push and delete).
-        let maybe_jwt = self
-            .client
-            .auth(reference, &self.auth, RegistryOperation::Push)
-            .await
-            .map_err(|e| LofsError::Registry(format!("token exchange for DELETE: {e}")))?;
-
-        match maybe_jwt {
-            Some(jwt) => Ok(self.http.delete(url).bearer_auth(jwt).send().await?),
-            None => Ok(first),
-        }
     }
 }
 
