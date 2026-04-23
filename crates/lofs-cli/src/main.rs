@@ -59,11 +59,13 @@ struct Cli {
     )]
     token: Option<String>,
 
-    /// Registry flavour driver. `auto` (default) picks from the hostname —
-    /// known hosts: `registry.gitlab.com` and `*.gitlab.*` → `gitlab`.
-    /// Anything else → `generic` (OCI 1.1 baseline — Zot, Distribution, Harbor).
-    /// Use an explicit value to force a driver on a self-hosted install
-    /// with a non-obvious hostname.
+    /// Registry flavour driver. `auto` (default) picks from the hostname:
+    ///   registry.gitlab.com, *.gitlab.* → `gitlab`
+    ///   ghcr.io, *.ghcr.io             → `ghcr` (scaffold)
+    ///   everything else                 → `generic` (OCI 1.1 baseline —
+    ///                                     Zot, Distribution, Harbor)
+    /// Valid explicit values: generic | gitlab | ghcr | harbor | auto.
+    /// Useful for self-hosted installs with non-obvious hostnames.
     #[arg(long, global = true, env = "LOFS_DRIVER", default_value = "auto")]
     driver: String,
 

@@ -269,9 +269,11 @@ export LOFS_REGISTRY_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 
 ```bash
 lofs doctor
-#   registry:   https://registry.gitlab.com/<user>/lofs-testbed
+#   driver:     gitlab (GitLab Container Registry — Shared repo mode, DELETE via /api/v4)
+#   mode:       Shared
 #   auth:       basic:<user>
 #   prefix:     <user>/lofs-testbed
+#   caps:       artifactType=false, nativeDelete=false, catalog=true
 #   status:     ok (0 bucket(s) visible)
 
 lofs create research-handoff --ttl-days 2
@@ -289,10 +291,25 @@ lofs stat research-handoff      # reads them back identically
 That's the primitive. Phase 1.2 (`lofs mount rw / unmount commit`) layers the actual file-based
 handoff workflow on top — same registry, now with full POSIX overlay content, not just identity.
 
+## Registry compatibility
+
+LOFS picks a `RegistryDriver` from the hostname (`--driver NAME` to
+override). Each driver encodes the flavour's quirks so the CLI works
+uniformly. See [`bench/registry-comparison.md`](bench/registry-comparison.md)
+for the full matrix; highlights:
+
+| Target | Driver | Auto-detected? | Repo mode | Native DELETE |
+|---|---|---|---|---|
+| Local Zot | `generic` | fallback | Separate | ✅ |
+| CNCF Distribution | `generic` | fallback | Separate | ✅ (with `REGISTRY_STORAGE_DELETE_ENABLED=true`) |
+| GitLab.com / self-hosted GitLab | `gitlab` | by hostname | Shared | via `/api/v4`, token needs `api` scope |
+| GHCR | `ghcr` | by hostname | Shared | scaffold — baseline behaviour for now |
+| Harbor | `harbor` | opt-in | Separate | scaffold |
+
 ## Known limitations (v0.0.1)
 
 - **`mount` / `unmount`** — not implemented yet; CLI prints a clean "not supported on this platform" error. These are Phase 1.2 (Linux FUSE backend + intent-manifest coordination, see [ADR-002](docs/architecture/adr/ADR-002-cooperative-coordination.md)).
-- **`rm` against managed GitLab.com** — GitLab closes the OCI DELETE manifest endpoint for hosted registries; use the project's **Container Registry** UI to drop tags. Self-hosted GitLab with registry DELETE enabled, Zot, and Distribution all work fully. Native GitLab API fallback is tracked as Phase 1 follow-up.
+- **`rm` against managed GitLab.com** — GitLab closes the OCI DELETE manifest endpoint. LOFS's `gitlab` driver falls back to `DELETE /api/v4/projects/:id/registry/repositories/:rid/tags/:tag`; the token must carry the `api` scope (classic PAT) or the "API" granular permission (fine-grained). Fine-grained PATs with only `read_registry` + `write_registry` can create/list/stat but **not** remove — regenerate with `api` to enable `lofs rm`.
 - **No keyring integration** — credentials live in env vars / `~/.docker/config.json`. OS keychain support is on the roadmap.
 
 See [`docker/docker-compose.yml`](docker/docker-compose.yml) for the

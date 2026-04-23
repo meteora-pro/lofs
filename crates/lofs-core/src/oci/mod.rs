@@ -13,8 +13,8 @@ pub mod media_types;
 pub mod registry;
 
 pub use driver::{
-    DeleteContext, DriverRef, GenericDriver, GitLabDriver, RateLimitPolicy, RegistryDriver,
-    detect_from_url, driver_by_name_or_auto,
+    DeleteContext, DriverRef, GenericDriver, GhcrDriver, GitLabDriver, HarborDriver,
+    RateLimitPolicy, RegistryDriver, detect_from_url, driver_by_name_or_auto,
 };
 pub use manifest::{BucketConfig, ListedManifest, bucket_annotations, bucket_from_annotations};
 pub use media_types::{ANNOTATION_NS, BUCKET_CONFIG_V1, INTENT_MANIFEST_V1, SNAPSHOT_MANIFEST_V1};

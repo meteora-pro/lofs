@@ -36,10 +36,14 @@ use super::registry::RepoMode;
 use crate::error::LofsResult;
 
 pub mod generic;
+pub mod ghcr;
 pub mod gitlab;
+pub mod harbor;
 
 pub use generic::GenericDriver;
+pub use ghcr::GhcrDriver;
 pub use gitlab::GitLabDriver;
+pub use harbor::HarborDriver;
 
 /// Result of auto-detection given a parsed base URL.
 pub type DriverRef = Arc<dyn RegistryDriver + Send + Sync>;
@@ -175,7 +179,11 @@ pub fn detect_from_url(host: &str) -> DriverRef {
     if is_gitlab_host(host) {
         return Arc::new(GitLabDriver::new());
     }
-    // TODO(sprint): ghcr.io, *.harbor.* once dedicated drivers land.
+    if is_ghcr_host(host) {
+        return Arc::new(GhcrDriver::new());
+    }
+    // Harbor has no canonical hostname — users self-host it on arbitrary
+    // domains — so there's no auto-detect rule. Opt in with `--driver harbor`.
     Arc::new(GenericDriver::new())
 }
 
@@ -186,8 +194,10 @@ pub fn driver_by_name_or_auto(name: &str, host: &str) -> LofsResult<DriverRef> {
         "auto" => Ok(detect_from_url(host)),
         "generic" => Ok(Arc::new(GenericDriver::new())),
         "gitlab" => Ok(Arc::new(GitLabDriver::new())),
+        "ghcr" => Ok(Arc::new(GhcrDriver::new())),
+        "harbor" => Ok(Arc::new(HarborDriver::new())),
         other => Err(crate::error::LofsError::Other(format!(
-            "unknown driver `{other}`; valid: auto | generic | gitlab"
+            "unknown driver `{other}`; valid: auto | generic | gitlab | ghcr | harbor"
         ))),
     }
 }
@@ -200,6 +210,10 @@ fn is_gitlab_host(host: &str) -> bool {
     matches!(host, "registry.gitlab.com")
         || host.starts_with("registry.gitlab.")
         || host.contains(".gitlab.")
+}
+
+fn is_ghcr_host(host: &str) -> bool {
+    host == "ghcr.io" || host.ends_with(".ghcr.io")
 }
 
 #[cfg(test)]
@@ -244,8 +258,16 @@ mod tests {
     #[test]
     fn detect_falls_back_to_generic() {
         assert_eq!(detect_from_url("localhost:5100").name(), "generic");
-        assert_eq!(detect_from_url("ghcr.io").name(), "generic"); // until Ghcr driver lands
-        assert_eq!(detect_from_url("harbor.internal").name(), "generic");
+        assert_eq!(
+            detect_from_url("harbor.internal").name(),
+            "generic",
+            "no canonical Harbor hostname — Harbor opt-in via --driver harbor"
+        );
+        assert_eq!(
+            detect_from_url("quay.io").name(),
+            "generic",
+            "Quay driver not implemented yet"
+        );
     }
 
     #[test]

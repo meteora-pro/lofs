@@ -118,6 +118,27 @@ storage-abstraction layer.
 
 ---
 
+## Registry compatibility matrix
+
+Live behaviour observed on each target with the default LOFS driver
+picked from the URL (override with `--driver NAME`).
+
+| Capability | Zot (Separate mode) | Distribution (Separate) | GitLab.com (Shared) | GHCR (scaffold) | Harbor (scaffold) |
+|---|---|---|---|---|---|
+| Repo addressing | `lofs/<org>/<name>` | `lofs/<org>/<name>` | `<user>/<project>:<org>.<name>` | — | — |
+| `create` | ✅ | ✅ | ✅ | (untested) | (untested) |
+| `list` | ✅ `/v2/_catalog` | ✅ | ✅ `list_tags` | (untested) | (untested) |
+| `stat` | ✅ | ✅ | ✅ | (untested) | (untested) |
+| `rm` | ✅ native DELETE | ✅ (needs `REGISTRY_STORAGE_DELETE_ENABLED=true`) | ⚠️ GitLab native API, token needs `api` scope | (untested) | ✅ with delete enabled |
+| Custom `config.mediaType` | ✅ any | ✅ any | ❌ allow-list only → we use `application/vnd.oci.image.config.v1+json` | — | — |
+| OCI 1.1 `artifactType` | ✅ | ✅ | ❌ allow-list → driver skips | ✅ (expected) | ✅ (expected) |
+| Rate limit cap (LOFS default) | none | none | 10 concurrent, 5 retries | 8 concurrent, 4 retries | none |
+| Auto-detected by LOFS | default (fallback) | default (fallback) | hostname match | `ghcr.io` match | opt-in via `--driver harbor` |
+
+The `LOFS_DRIVER` env var / `--driver` flag overrides auto-detection;
+`lofs doctor` prints which driver is active and the capability flags it
+declares.
+
 ## Integration findings
 
 Captured from the `tests/it_registry.rs` suite (`make test-e2e`). Each
