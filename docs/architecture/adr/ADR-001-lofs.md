@@ -15,13 +15,14 @@ related_issues: []
 
 ## Status
 
-**proposed** — четвёртая итерация дизайна, фиксирующая финальный нейминг и L0 minimum. Итерационная история:
+**proposed** — пятая итерация дизайна. Итерационная история:
 
 - **v1** CRDT-based shared workspace (3-layer Loro + HLC + transactional shell) — отвергнут как research-territory, см. [RESEARCH-002](../research/RESEARCH-002-crdt-fs-space.md).
 - **v2** pivot к fork-merge модели, LLM-driven merge — первый production-ready подход.
 - **v3** углубление через [RESEARCH-003](../research/RESEARCH-003-layered-bucket-storage.md) + [RESEARCH-004](../research/RESEARCH-004-rustfs-oci-coordination.md) — CDC + packs, OCI artifacts, MAST-based coordination, HITL hooks.
 - **v3.5** pivot к **mount/unmount L0** — 4 MCP тула поверх OCI layers + rootless overlay (Buildah/libfuse-fs ecosystem). [RESEARCH-005](../research/RESEARCH-005-rust-oci-ecosystem.md) зафиксировал Rust-стек.
-- **v4 (текущий)** — finальный нейминг **LOFS**, OSS repo `meteora-pro/lofs`, pair с LOKB. Competitive landscape — [RESEARCH-006](../research/RESEARCH-006-oss-prior-art.md).
+- **v4** — finальный нейминг **LOFS**, OSS repo `meteora-pro/lofs`, pair с LOKB. Competitive landscape — [RESEARCH-006](../research/RESEARCH-006-oss-prior-art.md).
+- **v4.1 (текущий)** — координация вынесена в отдельный [ADR-002](ADR-002-cooperative-coordination.md): OCI-реестр стал единственным обязательным backend'ом, SQL/Redis — опциональные extension'ы. Разделены **L0 active scope** и **L1-L7 evolution roadmap**. CDC/pack/merge-engine/HITL больше не в Decision — они в "Future Evolution" и активируются data-driven триггерами.
 
 ## Context
 
@@ -49,149 +50,167 @@ related_issues: []
 
 ### Ограничения
 
-1. Agent sandbox обычно без `CAP_SYS_ADMIN` → FUSE опционален.
-2. S3-like eventual consistency cross-region → bias к immutable content-addressable.
-3. LLM-merge стохастичен → safeguards (quarantine, dry-run, review-before-execute).
+1. Agent sandbox обычно без `CAP_SYS_ADMIN` → FUSE опционален (MVP: rootless через user namespaces).
+2. Registry eventual consistency cross-region → bias к immutable content-addressable.
+3. LLM-merge (L1+) стохастичен → safeguards (quarantine, dry-run, review-before-execute).
 4. Storage растёт → TTL + ref-counting GC с day 0.
-5. DevBoy инфра (OIDC, Postgres, Redis) — переиспользуется.
+5. **Нет обязательной внешней БД.** OCI-реестр — единственный обязательный backend координации (см. [ADR-002](ADR-002-cooperative-coordination.md)). DevBoy инфра (OIDC, Postgres, Redis) переиспользуется **опционально** — как auth-provider (OIDC) и strong-lock backend (Redis/Postgres extension).
 
 ## Decision
 
-> **Решение:** построить `lofs` — agent-scoped ephemeral workspace с git-like `snapshot / fork / merge / sub-mount` семантикой, chunked blob-pool (FastCDC + pack-files), hot tier через self-hosted S3-compatible (MinIO primary, RustFS когда GA), S3 cold mirror + Glacier archive. Merge — review-centric proposal с 4-tier strategy (trivial → syntax-aware → LLM-driven → human). Sharing через OCI artifacts (Zot/Harbor). Multi-agent coordination — explicit intent metadata + 7-state claim lifecycle + HITL hooks. Никакого CRDT на hot-path.
+> **Решение (L0 MVP):** построить `lofs` — agent-scoped ephemeral workspace с git-like snapshot-семантикой, где **OCI-реестр — единственный обязательный backend** и для контента (layers), и для координации (intent manifests через Referrers API). Агент получает обычный POSIX-путь через rootless FUSE overlay, работает стандартными инструментами (cat, grep, cargo, git). Каждый commit = новый OCI-слой. Координация между агентами **cooperative** (см. [ADR-002](ADR-002-cooperative-coordination.md)) — intent-декларации, pull-before-write, path-scoped writes. Никакой обязательной SQL/Redis-зависимости; Postgres/Redis/etcd подключаются как `Coordination` extension-backends для команд с requirement на strong guarantees.
+>
+> **L1-L7 evolution** — CDC + pack-files, LLM-driven merge-engine, 10-tool intent lifecycle, tiered retention, AI-summaries, HITL hooks — добавляется **только** когда telemetry показывает необходимость. Ни один из этих компонентов не предполагается в MVP.
+>
+> Никакого CRDT на hot-path (rejected в v2 — см. [RESEARCH-002](../research/RESEARCH-002-crdt-fs-space.md)).
+
+### L0 vs L1-L7 scope
+
+**L0 (active, MVP):**
+
+- 4 MCP-тула: `lofs.create / list / mount / unmount`
+- Bucket = OCI repository под `<registry>/lofs/<org>/<bucket>`
+- Snapshot = OCI image-manifest (media type `application/vnd.meteora.lofs.snapshot.v1+json`)
+- Intent = OCI image-manifest с `subject` на `:latest`, media type `application/vnd.meteora.lofs.intent.v1+json`
+- Cooperative coordination через intent manifests + path-scoped writes — полностью в [ADR-002](ADR-002-cooperative-coordination.md)
+- Storage: plain tar.zst layer per commit; никакого dedup
+- Conflict policy: pull-before-commit + scope-disjoint append + last-writer-wins для пересекающихся файлов (см. ADR-002)
+
+**L1-L7 (future evolution, не в MVP):**
+
+| Layer | Activation trigger | Описание |
+|-------|-------------------|----------|
+| **L1** | fork+merge workflow в реальном использовании | LLM-driven merge ladder (Identical → Mergiraf → LLM → Human) — см. "Merge system (L1+)" ниже |
+| **L2** | storage cost > threshold | Per-file BLAKE3 dedup + reference-counting GC |
+| **L3** | dedup ratio < 2× | Content-defined chunking (FastCDC) + pack-files (zstd:chunked) — см. "Chunking + Pack-files (L3+)" ниже |
+| **L4** | reads of partial large files | Lazy-mount через SOCI-style zTOC + Range-GET |
+| **L5** | долгоживущие архивы | Tiered hot/cold storage (self-hosted hot + S3 Glacier) — см. "Tiered retention (L5+)" ниже |
+| **L6** | agent confusion в длинной истории | AI-generated cold-tier summaries + Ed25519 signatures — см. "AI summaries (L6+)" ниже |
+| **L7** | первый инцидент от auto-merge | HITL approval policy per sensitive path — см. "HITL hooks (L7+)" ниже |
+
+Все разделы ниже, помеченные `(L1+)` / `(L3+)` / `(L5+)` / `(L6+)` / `(L7+)`, — future work. Их содержание сохранено, чтобы зафиксировать проработанный дизайн, но в MVP не реализуется.
 
 ### Объекты
 
-| Объект | Что это | Mutability |
-|--------|---------|-----------|
-| **Bucket** | Named workspace с TTL (дефолт 30d) | mutable head |
-| **Snapshot** | Immutable версия bucket'а (~ git commit) | immutable, content-addressable |
-| **Tree** | Канонически-сериализованная `path → chunk_ref[]` map | immutable |
-| **Chunk** | Content-defined chunk (BLAKE3-hashed, FastCDC boundaries) | immutable, globally dedup |
-| **Pack** | Bundle из N chunks, zstd:chunked compressed, ~16 MiB target | immutable |
-| **Blob (logical)** | File view — sequence of chunk_refs | immutable |
-| **Fork** | Новый bucket от чужого snapshot'а (COW через shared CAS) | new bucket |
-| **Intent** | Декларация цели fork'а (goal, scope, labels, TTL) | lifecycle-managed |
-| **MergePlan** | Three-way diff с auto-resolutions + reasoning | transient, reviewable |
-| **SubMount** | OCI subject-ref от snapshot'а parent bucket'а к snapshot'у другого | часть tree |
+| Объект | Что это | Mutability | L-tier |
+|--------|---------|-----------|--------|
+| **Bucket** | Named workspace с TTL | mutable head tag | **L0** |
+| **Snapshot** | Immutable версия bucket'а (OCI image-manifest) | immutable, content-addressable | **L0** |
+| **Intent** | Декларация активной mount-сессии (agent, mode, purpose, scope, heartbeat) как OCI-манифест с `subject → :latest` | lifecycle-managed | **L0** (ADR-002) |
+| **Fork** | Новый bucket от чужого snapshot'а | new bucket | **L0** (без merge) |
+| **Chunk** | Content-defined chunk (BLAKE3-hashed, FastCDC boundaries) | immutable, globally dedup | L3+ |
+| **Pack** | Bundle из N chunks, zstd:chunked compressed, ~16 MiB target | immutable | L3+ |
+| **Tree** | Канонически-сериализованная `path → chunk_ref[]` map | immutable | L3+ |
+| **MergePlan** | Three-way diff с auto-resolutions + reasoning | transient, reviewable | L1+ |
+| **SubMount** | OCI subject-ref от snapshot'а parent bucket'а к snapshot'у другого | часть tree | L1+ |
 
-### Architecture
+### Architecture (L0)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                           Agent runtime                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │  bucket.*    │  │  snap.*      │  │  merge.*     │  │  intent.*    │      │
-│  │  fork.*      │  │  ws.*        │  │  review.*    │  │  publish.*   │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-└─────────┼────────────────┼─────────────────┼─────────────────┼────────────────┘
-          │                │                 │                 │
-  ┌───────▼────────────────▼─────────────────▼─────────────────▼────────────┐
-  │                   lofs core (Rust)                            │
-  │  ┌──────────────────────────────────────────────────────────────────┐   │
-  │  │  Snapshot DAG + Tree canonical-encode (CBOR + BLAKE3)            │   │
-  │  ├──────────────────────────────────────────────────────────────────┤   │
-  │  │  Chunking (FastCDC) + Pack writer (zstd:chunked) + Pack index    │   │
-  │  ├──────────────────────────────────────────────────────────────────┤   │
-  │  │  Intent registry (Postgres canonical + Redis active)              │   │
-  │  ├──────────────────────────────────────────────────────────────────┤   │
-  │  │  MergeStrategy ladder (Trivial → TreeSitter → LLM → Human)       │   │
-  │  ├──────────────────────────────────────────────────────────────────┤   │
-  │  │  Cold-tier summarizer (AI summary, Ed25519-signed, embeddings)    │   │
-  │  └────────────┬─────────────────┬──────────────────┬─────────────────┘   │
-  │               │                 │                  │                      │
-  │      ┌────────▼──────┐   ┌──────▼────────┐  ┌─────▼──────────┐          │
-  │      │  OpenDAL hot  │   │  OpenDAL cold │  │ OCI client     │          │
-  │      │  (S3 compat)  │   │  (S3 mirror)  │  │ (publish/share)│          │
-  │      └────────┬──────┘   └──────┬────────┘  └─────┬──────────┘          │
-  └───────────────┼─────────────────┼──────────────────┼──────────────────────┘
-                  │                 │                  │
-         ┌────────▼──────┐  ┌───────▼─────────┐  ┌─────▼────────────┐
-         │ MinIO/RustFS/ │  │  AWS S3 (IA /   │  │  Zot / Harbor    │
-         │  SeaweedFS    │  │   Glacier)      │  │  OCI registry    │
-         │  (hot)        │  │  (cold mirror)  │  │  (shareable)     │
-         └───────────────┘  └─────────────────┘  └──────────────────┘
+│  ┌──────────────────────────────────────────────────────────────────────┐    │
+│  │  4 MCP tools:  lofs.create  lofs.list  lofs.mount  lofs.unmount       │    │
+│  └──────────────────────────────┬───────────────────────────────────────┘    │
+└─────────────────────────────────┼────────────────────────────────────────────┘
+                                  │ JSON-RPC (stdio / WS)
+         ┌────────────────────────▼────────────────────────────────┐
+         │                  lofs-daemon (Rust)                      │
+         │                                                          │
+         │  ┌────────────────┐  ┌──────────────────┐  ┌──────────┐  │
+         │  │ Overlay mount  │  │ Coordination     │  │  Registry│  │
+         │  │ (fuser +       │  │ (intent          │  │  client  │  │
+         │  │  libfuse-fs +  │  │  manifests,      │  │  (oci-   │  │
+         │  │  ocirender)    │  │  ADR-002)        │  │  client) │  │
+         │  └───────┬────────┘  └─────┬────────────┘  └────┬─────┘  │
+         │          │                 │                    │         │
+         │          └────────────┬────┴─────────┬──────────┘         │
+         │                       │              │                    │
+         │             default: OciCoordination │                    │
+         │             extension: RedisCoordination / PgCoordination │
+         └───────────────────────┼──────────────┼────────────────────┘
+                                 │              │
+                                 ▼              ▼
+                     OCI-compatible registry (Zot / Harbor / GHCR / GitLab)
+                     · :latest           → HEAD snapshot-manifest
+                     · :intent-<sid>     → active intents (subject → :latest)
+                     · :snap-<ts>        → historical snapshot tags
+                     · blobs             → tar.zst layers + config JSON
 ```
+
+**L3+ evolution** дополняет картину CDC-chunking + pack-files + hot/cold tier — см. разделы "Chunking + Pack-files (L3+)" и "Tiered retention (L5+)" ниже. В L0 ни один из этих слоёв не присутствует.
 
 ### MCP tools API
 
+**L0 (active MVP) — 4 tools:**
+
 ```
-# Bucket lifecycle
-bucket.create(name, ttl_days?, labels?) → bucket_id
-bucket.stat(bucket_id) → metadata + active intents + warnings
-bucket.list(org_id, filter?)
-bucket.extend_ttl(bucket_id, days)
-bucket.promote_persistent(bucket_id)
-bucket.delete(bucket_id)                # immediate or on TTL
+lofs.create({ name, ttl_days, size_limit_mb, org? })
+    → { bucket_id, name, org, expires_at }
 
-# Snapshots
-snap.write(bucket, path, bytes)         # → pending-writes
-snap.delete(bucket, path)               # tombstone
-snap.status(bucket) → pending_diff
-snap.commit(bucket, message?, expected_parent?) → snapshot_id
-snap.list(bucket), snap.get(snapshot_id)
-snap.bookmark(snapshot_id, label?, ttl?)
-snap.unbookmark(snapshot_id)
-snap.list_bookmarks(bucket)
+lofs.list({ org?, filter?, include_inactive? })
+    → [{ bucket_id, name, org, status, expires_at, size_mb, active_intents[] }]
 
-# Reads
-ws.read(bucket, path, snapshot_id?) → bytes
-ws.ls(bucket, prefix?, snapshot_id?)
-ws.blame(bucket, path) → history
-ws.stat(bucket, path) → metadata
+lofs.mount({ bucket, mode: "ro" | "rw" | "fork",
+             purpose, scope?, expected_duration_sec,
+             ack_concurrent? })
+    → { mount_path, session_id, base_snapshot }
+    | MountAdvisory { neighbours[], hints[] }         // see ADR-002
 
-# Fork
-fork.create(source_snapshot, intent: IntentSpec, new_name?) → new_bucket
-fork.parent(bucket)
-fork.rebase(bucket, new_base)
-fork.drift(bucket) → count + warning_level
-
-# Merge (review-centric)
-merge.propose(source_snap, target_snap, base?) → MergePlan
-merge.auto_resolve(plan) → partial_plan       # Tier 1+2
-merge.review(plan) → ReviewReport             # per-conflict reasoning
-merge.suggest(plan, conflict_id) → Resolution # LLM per-conflict
-merge.override(plan, conflict_id, resolution) # agent OR human edit
-merge.audit_decisions(plan) → decision_log
-merge.dry_run(plan, resolutions) → SnapshotPreview
-merge.execute(plan, approved_resolutions) → snapshot_id
-merge.approve(merge_id, decision)             # HITL gate
-merge.recover(quarantine_ref) → blob_ref
-
-# Intent lifecycle (coordination)
-intent.declare(bucket, IntentSpec) → intent_id
-intent.start(intent_id)
-intent.heartbeat(intent_id)             # every 30-60s, TTL 5min
-intent.update(intent_id, {status, progress, blocker})
-intent.complete(intent_id, outcome)
-intent.abandon(intent_id, reason)
-intent.handoff(intent_id, to_agent, context_artifact)
-intent.discover(org, filter)            # with scope-overlap, active-since
-intent.who_is_touching(bucket, path?)
-intent.negotiate(other_agent, proposal) → decision  # max 2 rounds
-intent.escalate_human(intent_id, reason)
-intent.verify_outcome(intent_id)        # dual-LLM drift check
-
-# Composition (OCI subject-refs)
-submount.add(parent_bucket, path, target_snapshot)
-submount.update(parent_bucket, path, new_snapshot)
-submount.resolve(bucket, path) → materialized_tree
-
-# Publish / share (via OCI artifacts)
-publish.freeze(snapshot_id, registry_ref, ttl?) → oci_artifact_ref
-publish.import(oci_artifact_ref) → new_bucket_as_fork
-publish.list_shared(org) → [artifact_ref]
-
-# History & audit
-history.narrative(bucket, range)        # AI-generated summary
-history.by_agent(bucket, agent_id)
-history.by_path(bucket, glob, range)
-history.semantic_search(bucket, query)  # embedding search
-history.retrieve_archive(snap_id)       # best-effort cold recovery
+lofs.unmount({ session_id, action: "commit" | "discard",
+               message?, conflict_policy? })
+    → { new_snapshot_id, parent_snapshot, neighbour_snapshots[] }
+    | PushConflict { changed_paths[], hints[] }
 ```
 
-### Storage layer (hot + cold)
+Argument/return shapes и coordination-семантика — полностью в [ADR-002](ADR-002-cooperative-coordination.md).
 
-**Hot tier** — self-hosted S3-compatible через OpenDAL. Выбор backend'а plural:
+**L1-L7 evolution surface (future work, не в MVP):**
+
+```text
+# L1 — merge engine (triggered by fork+merge workflow adoption)
+merge.propose / merge.auto_resolve / merge.review / merge.suggest /
+merge.override / merge.audit_decisions / merge.dry_run / merge.execute /
+merge.approve / merge.recover
+
+# L1 — richer reads (triggered by agent demand for history tooling)
+ws.read / ws.ls / ws.blame / ws.stat
+
+# L2-L3 — snapshot primitives surfaced (triggered by dedup / CDC rollout)
+snap.write / snap.delete / snap.status / snap.commit / snap.list / snap.get
+snap.bookmark / snap.unbookmark / snap.list_bookmarks
+
+# L2 — fork surface (triggered by fork+merge workflow adoption)
+fork.create / fork.parent / fork.rebase / fork.drift
+
+# L2 — intent lifecycle richer than L0 (triggered by handoff / negotiation demand)
+intent.declare / intent.start / intent.heartbeat / intent.update /
+intent.complete / intent.abandon / intent.handoff / intent.discover /
+intent.who_is_touching / intent.negotiate / intent.escalate_human /
+intent.verify_outcome
+
+# L4+ — composition (triggered by monorepo / submodule patterns)
+submount.add / submount.update / submount.resolve
+
+# L5 — external sharing (triggered by cross-org artifact flow)
+publish.freeze / publish.import / publish.list_shared
+
+# L6 — history / semantic search (triggered by long-history agent confusion)
+history.narrative / history.by_agent / history.by_path /
+history.semantic_search / history.retrieve_archive
+```
+
+Каждая из этих групп — это проработанный дизайн (разделы ниже), активируемый только когда telemetry покажет потребность. MVP targets строго L0.
+
+### Storage layer (L0)
+
+**L0** — **только OCI-реестр**. Никакого S3, MinIO, OpenDAL. Каждый commit = один tar.zst layer, загруженный через `oci-client::push_blob` + новый manifest. Весь dedup в L0 — это OCI-level blob dedup реестра (одинаковые layer-digest'ы не дублируются в storage реестра).
+
+Swap OCI-реестра — через config: `OCI_REGISTRY=http://localhost:5000` для локального Zot, `registry.example/lofs` для remote. [ADR-002](ADR-002-cooperative-coordination.md) фиксирует registry-level coordination.
+
+### Storage layer — hot + cold (L3+ / L5+)
+
+**Hot tier (L3+)** — self-hosted S3-compatible через OpenDAL. Активируется когда dedup ratio < 2× на plain OCI layers и требуется CDC-level dedup. Выбор backend'а plural:
 
 | Backend | Maturity | License | Use |
 |---------|----------|---------|-----|
@@ -216,7 +235,9 @@ Hot (MinIO/RustFS)  ──native replication──▶  S3 Standard-IA
 
 **Read-through fallback:** hot 404 → our lofs-daemon fetches from cold → repopulates hot (write-back cache).
 
-### Chunking + Pack-files
+### Chunking + Pack-files (L3+)
+
+> ⚠️ **L3 future work.** MVP использует plain tar.zst layer per commit — OCI-level blob dedup достаточен для большинства agent workflows. Секция ниже фиксирует проработанный дизайн CDC + packs для будущей активации, когда telemetry покажет dedup ratio < 2×.
 
 **CDC:** [`fastcdc`](https://crates.io/crates/fastcdc) v3.x (v2020 algorithm), ~2 GB/s single-core.
 
@@ -244,7 +265,7 @@ max = "4 MiB"
 - Format: `EncryptedBlob1 || ... || EncryptedBlobN || EncryptedHeader || Header_Length`.
 - Compression: **zstd-3 hot**, **zstd-19 archive**.
 - **zstd:chunked format** внутри — позволяет Range-GET без decompressing всего pack'а (SOCI-style lazy pull).
-- **Pack index** → Postgres + `moka` LRU + Bloom filter per-bucket.
+- **Pack index** → local SQLite или Postgres (L1+ extension) + `moka` LRU + Bloom filter per-bucket.
 - **Pack-reorganize** (триггеры: pack > 100 MB split, pack < 4 MB старше 7d merge).
 
 ### Wire formats (OCI-compatible media types)
@@ -265,7 +286,9 @@ application/vnd.meteora.lofs.summary.v1+json      # cold-tier AI summary
 
 IANA registration — **не требуется для MVP** (Helm ждал 4 года; WASM не регистрировали). Vendor-prefix достаточен.
 
-### Merge system — review-centric
+### Merge system — review-centric (L1+)
+
+> ⚠️ **L1 future work.** MVP разрешает конфликты на commit-time через `conflict_policy` из [ADR-002](ADR-002-cooperative-coordination.md) (reject / scope_merge / fork_on_conflict) — без LLM. Полноценный merge-engine активируется когда fork+merge workflow становится регулярным паттерном.
 
 Merge — **не финальное действие**, а **reviewable proposal**. Agent (или human) всегда может override.
 
@@ -352,7 +375,9 @@ text_diff_soft_limit = "500 KiB"
 text_diff_hard_limit = "5 MiB"
 ```
 
-### Intent & claim lifecycle
+### Intent & claim lifecycle (L1+)
+
+> ⚠️ **L1+ future work.** MVP реализует лёгкий intent-lifecycle через OCI intent-manifests ([ADR-002](ADR-002-cooperative-coordination.md)): mount publishes intent, heartbeat обновляет `heartbeat_at`, unmount удаляет. Полноценный 7-state lifecycle + 10 intent-tools + max-hop enforcement + negotiation rounds — это L1+ evolution, когда MAST-style failure modes начнут реально наблюдаться.
 
 **States:**
 
@@ -395,7 +420,9 @@ Schema compatible с [A2A TaskCard](https://a2a-protocol.org/latest/specificatio
 
 **MAST-based test matrix** для Phase 7 loadtest: 100 agents × 10 buckets, measure frequency of each of 14 failure modes.
 
-### Human-in-the-loop (HITL) hooks
+### Human-in-the-loop (HITL) hooks (L7+)
+
+> ⚠️ **L7 future work.** MVP не имеет HITL-hook'ов — все actions разрешены агенту. Активация — после первого инцидента от auto-merge или когда команда начнёт работать с sensitive paths (secrets, migrations, CI config).
 
 Per-bucket policy в `.lofs.toml`:
 
@@ -416,7 +443,9 @@ on_publish = "audit_notify"      # email к org admins
 
 Pattern заимствован у LangGraph interrupt + GitHub Copilot Workspace ("agent produces artifact, human approves, не auto-merge").
 
-### Tiered retention & AI-generated summaries
+### Tiered retention & AI-generated summaries (L5-L6+)
+
+> ⚠️ **L5-L6 future work.** MVP держит все snapshot'ы в OCI-реестре до TTL expiry (reference-counting GC — L2+). Tiered hot/cold + AI-summaries активируются когда storage cost становится существенным или длинная история начинает путать агентов.
 
 Данные существуют одновременно в трёх representations'ах:
 
@@ -459,7 +488,9 @@ Pattern заимствован у LangGraph interrupt + GitHub Copilot Workspace
 - Tiered (hot self-hosted + S3 cold): **~$100-250/mo ≈ $1200-3000/year** (но hot self-hosted → compute cost добавляется, итого comparable; decoupled от read volume).
 - Savings from dedup CDC + compaction summary: **2-5× storage**, **read bandwidth amortized**.
 
-### Bookmark mechanism
+### Bookmark mechanism (L5+)
+
+> ⚠️ **L5+ future work.** Bookmarks становятся релевантными вместе с tiered compaction. В L0 все snapshot'ы равнозначны.
 
 ```
 snap.bookmark(snapshot_id, label?, ttl?)
@@ -496,29 +527,74 @@ ZFS-hold pattern: `bookmark: {label, held_by, ttl}` в snapshot metadata. Exclud
 | Компонент | Выбор | Fallback |
 |-----------|-------|----------|
 | Hot storage | **MinIO** (primary) через OpenDAL | SeaweedFS, RustFS когда GA |
-| Cold storage | **AWS S3** (IA → Glacier) через OpenDAL | GCS, R2 |
-| Storage abstraction | **OpenDAL** (pin conservative) | — |
-| Content hashing | **BLAKE3** | SHA-256 |
-| Chunking | **`fastcdc` v3.x** (v2020 algorithm) | SeqCDC when > 1 GB/s bottleneck |
-| Snapshot hashing | **BLAKE3** поверх canonical CBOR | — |
-| Tree canonical | **`ciborium`** (deterministic CBOR) | MessagePack |
-| Compression (hot pack) | **zstd-3** | — |
-| Compression (archive) | **zstd-19** | — |
-| Pack format | **zstd:chunked** (Podman GA 2026) | Plain zstd + SOCI-style zTOC |
-| OCI artifact client | **`oci-client`** + **`oci-spec`** | `oras` crate |
-| OCI registry primary | **Zot** (self-hosted, Apache 2.0) | Harbor, CNCF Distribution |
-| Metadata KV | **PostgreSQL** (DevBoy) | — |
-| Active state / heartbeats | **Redis** (DevBoy) | — |
-| Chunk-index cache | **`moka`** (LRU/TinyLFU) | — |
-| Audit query | **DuckDB over S3 parquet** | ClickHouse |
-| Embedding store | **Qdrant** or **pgvector** | FAISS (no filter) |
-| Structured merge | **Mergiraf** (tree-sitter, 33 langs) via subprocess | Weave (early-adopter) |
-| Op signing | **`ed25519-dalek`** | — |
-| External artifact signing | **`cosign`** (sigstore) | — |
-| FUSE (opt-in) | **`fuse3_opendal` / `ofs`** | fuser + custom |
-| MCP protocol | **`rmcp`** (official Rust SDK) | — |
+#### L0 engineering stack (MVP — what ships)
 
-### Storage layout
+| Компонент | Выбор | Fallback |
+|-----------|-------|----------|
+| OCI artifact client | **`oci-client`** + **`oci-spec`** | `oras` crate |
+| OCI registry primary | **Zot** (local dev + self-hosted, Apache 2.0) | GitLab Container Registry (benchmark target), Harbor |
+| Content hashing | **BLAKE3** | SHA-256 |
+| Snapshot hashing | **BLAKE3** поверх canonical CBOR | — |
+| Canonical encoding | **`ciborium`** (deterministic CBOR) | — |
+| Compression (layers) | **zstd-3** | — |
+| Tar packing | sync **`tar`** crate (never tokio-tar — CVE-2025-62518) | — |
+| Coordination backend (default) | **`OciCoordination`** (intent-manifests via Referrers API) | — |
+| FUSE overlay | **`fuser`** + **`libfuse-fs`** (beta, R1) | custom overlay (~1500 LOC fallback) |
+| Layer materialization | **`ocirender`** (beta, R2) | plain OCI extract |
+| Linux syscalls | **`nix`** + **`caps`** + **`sys-mount`** | — |
+| Async runtime | **`tokio`** | — |
+| MCP protocol | **`rmcp`** (official Rust SDK) | — |
+| CLI framework | **`clap`** v4 derive | — |
+| Observability | **`tracing`** + **Prometheus metrics** | — |
+
+**L0 explicitly does NOT ship:** Postgres, Redis, SQLite, OpenDAL, MinIO, S3, FastCDC, zstd:chunked, cosign, Qdrant, DuckDB, Mergiraf. Every single one of those is scoped to a later layer — see table below.
+
+#### L1-L7 extension stack (future)
+
+| Компонент | L-tier | Выбор | Trigger |
+|-----------|--------|-------|---------|
+| Coordination backend (strong) | L1+ | **Redis 6+** (`SETNX/EXPIRE`, pub/sub) — see ADR-002 | 20+ concurrent rw on same bucket |
+| Coordination backend (audit) | L1+ | **PostgreSQL 14+** (`FOR UPDATE SKIP LOCKED`, triggers) — ADR-002 | compliance / audit trail requirement |
+| Structured merge | L1 | **Mergiraf** (tree-sitter, 33 langs) via subprocess | fork+merge workflow adoption |
+| Op signing | L1+ | **`ed25519-dalek`** | shareable snapshots |
+| External artifact signing | L2+ | **`cosign`** (sigstore) | cross-org publish |
+| Storage abstraction | L3+ | **OpenDAL** (pin conservative) | CDC/pack layer |
+| Chunking | L3 | **`fastcdc` v3.x** (v2020 algorithm) | dedup ratio < 2× |
+| Pack format | L3 | **zstd:chunked** (Podman 2026 GA) | reads of partial large files |
+| Chunk-index cache | L3+ | **`moka`** (LRU/TinyLFU) | pack hot-path |
+| Hot tier | L5 | **MinIO** primary, SeaweedFS, RustFS когда GA | tiered retention |
+| Cold storage | L5 | **AWS S3** (IA → Glacier) через OpenDAL | cost > threshold |
+| Compression (archive) | L5 | **zstd-19** | cold-tier push |
+| Embedding store | L6 | **Qdrant** or **pgvector** | semantic search на summaries |
+| Audit query | L6+ | **DuckDB over S3 parquet** | audit log surface |
+
+### Storage layout (L0)
+
+**L0 — один OCI-реестр, один repository на bucket:**
+
+```
+<registry>/lofs/<org>/<bucket_name>
+├── manifests/
+│   ├── :latest                              ← HEAD snapshot-manifest digest
+│   ├── :snap-<YYYYMMDDTHHMMSS>              ← historical snapshot tags
+│   └── :intent-<session_id>                 ← ephemeral intent-manifests
+│                                              (subject → :latest via Referrers API)
+│
+└── blobs/<sha256>
+    ├── <layer tar.zst per commit>
+    ├── <config JSON per snapshot>
+    └── <intent config JSON>
+```
+
+**Snapshot identity** = OCI manifest digest (sha256). Parent link = `subject` field в manifest + `annotations[pro.meteora.lofs.parent_snapshot]` для быстрого walk.
+
+**Intent identity** = OCI manifest digest + `:intent-<session_id>` tag для cleanup. `subject` указывает на `:latest` на момент mount; это автоматически делает intent видимым через Referrers API.
+
+**Никаких локальных файлов состояния, никакой БД.** Весь state in-registry. Daemon-restart / host-crash / disaster recovery тривиальны: поднять daemon, он pull'ит `:latest` + referrers — state восстановлен.
+
+### Storage layout (L3+) — hot + cold tiers
+
+> ⚠️ **L3+ future work.** Секция ниже — эскиз когда потребуется CDC-dedup + tiered retention. В L0 этого нет.
 
 ```
 <hot-store>/
@@ -538,37 +614,45 @@ ZFS-hold pattern: `bookmark: {label, held_by, ttl}` в snapshot metadata. Exclud
 └── archive/<period>/period.tar.zst         ← cold-tier dropped blobs
 ```
 
-`snapshot_id` = BLAKE3(canonical_serialize(snapshot)) включая parent, tree, metadata — Merkle-DAG проверяемость.
-
-Blob-pool **один на org** (не per-bucket). Fork от 50 GB bucket'а = килобайты metadata, не копирование данных.
+В L3+ `snapshot_id` = BLAKE3(canonical_serialize(snapshot)) — Merkle-DAG. Blob-pool **один на org** (не per-bucket), fork от 50 GB bucket'а = килобайты metadata.
 
 ## Consequences
 
-### Positive
+### Positive (L0 / L1+)
 
-- ✅ **Mental model git-like** — понятна любому инженеру.
-- ✅ **Complexity ядра** ниже чем у CRDT-модели на ~60%.
-- ✅ **LLM как merge-driver** — уникальный differentiator.
-- ✅ **Review-centric flow** — agent или human всегда может override, нет "чёрного ящика".
-- ✅ **Binary + large-file native** — CAS не различает, pack-files дёшевы.
-- ✅ **Chunk-level dedup** через FastCDC — 2-5× storage savings vs naive per-file blobs.
-- ✅ **Hot/cold tiering** — **savings 10-25× vs all-S3-Standard** на realistic workload (10 TB).
-- ✅ **OCI-compatible artifacts** — interop с Zot/Harbor, cosign signing, Referrers API free.
-- ✅ **Multi-agent coordination first-class** — intent lifecycle, MAST-tested, deadlock mitigations.
-- ✅ **HITL hooks** — sensitive paths не auto-merge.
-- ✅ **Cost-effective** — TTL + ref-counting GC + cold summaries.
+**L0:**
+- ✅ **Zero-infra** — один Zot (или любой OCI-реестр) покрывает весь L0 MVP. Никакого Postgres / Redis на critical path.
+- ✅ **Single source of truth** — state в реестре не расходится с БД; disaster-recovery тривиальна.
+- ✅ **Offline-capable** — локальный Zot на localhost делает single-host deployment полностью offline.
+- ✅ **Mental model git-like** — pull-before-commit, scope-disjoint parallel writes, конфликт = legitimate concern.
+- ✅ **OCI-compatible artifacts** — interop с Zot / Harbor / GHCR / GitLab, cosign signing, Referrers API free.
+- ✅ **Cooperative multi-writer** — N агентов в дизъюнктных scope'ах работают параллельно без contention (см. ADR-002).
+- ✅ **Complexity ядра** ниже чем у CRDT-модели на ~60% (и ниже SQL-first варианта на ~30%).
 - ✅ **Нет research-level risk.** Merkle-DAG + CAS + OCI — 20+ лет проверенных паттернов.
-- ✅ **Cross-cloud** — OpenDAL ~40 backend'ов бесплатно.
+
+**L1+ (при активации):**
+- ✅ **LLM как merge-driver** — уникальный differentiator (L1).
+- ✅ **Review-centric flow** — agent или human всегда может override, нет "чёрного ящика" (L1).
+- ✅ **Binary + large-file native** — CAS не различает, pack-files дёшевы (L3).
+- ✅ **Chunk-level dedup** через FastCDC — 2-5× storage savings vs naive per-file blobs (L3).
+- ✅ **Hot/cold tiering** — savings 10-25× vs all-S3-Standard на realistic workload (L5).
+- ✅ **HITL hooks** — sensitive paths не auto-merge (L7).
+- ✅ **Cross-cloud** — OpenDAL ~40 backend'ов бесплатно (L3+).
 
 ### Negative
 
-- ❌ **Нет realtime collaboration** (два агента live в одном файле → fork required).
-- ❌ **Merge conflicts реально случаются** (в CRDT по определению — нет).
-- ❌ **LLM-merge стохастичен и платный** — tokens cost.
-- ❌ **Stale forks** требуют monitoring + `fork.rebase` discipline.
-- ❌ **Operational burden от pack-tuning** — Phase 7 experimental iteration.
-- ❌ **Dependency на external registry** (Zot/Harbor) для publish.
-- ❌ **Compaction теряет intermediate state** — trade-off storage vs full-trace.
+**L0 trade-offs:**
+- ❌ **Нет strong pessimistic lock в default-пути** — concurrent rw на одни и те же файлы разрешаются на commit-time. Команды с реальным contention могут нуждаться в `RedisCoordination`/`PostgresCoordination` extensions.
+- ❌ **Registry eventual consistency** — редкие corner-case'ы где intent виден не сразу всем. Митигация — overlap detection на commit-time + conflict_policy.
+- ❌ **`lofs list` дороже чем SQL** — catalog scan + per-repo manifest pull. Для < 1000 buckets/org приемлемо.
+- ❌ **Rate limits** — Docker Hub / GHCR имеют pull-rate-limits. Production нужен self-hosted Zot / Harbor.
+
+**L1+ trade-offs (при активации):**
+- ❌ **Нет realtime collaboration** (два агента live в одном файле → fork required) — L0/L1.
+- ❌ **Merge conflicts реально случаются** — L1 merge engine.
+- ❌ **LLM-merge стохастичен и платный** — tokens cost (L1).
+- ❌ **Operational burden от pack-tuning** — experimental iteration (L3).
+- ❌ **Compaction теряет intermediate state** — trade-off storage vs full-trace (L5).
 
 ### Risks (ранжировано)
 
@@ -612,66 +696,44 @@ Rejected: A2A покрывает inter-agent messaging + task lifecycle, но н
 ### Alternative 7: Keyhive/Beelay E2EE sync (Ink & Switch)
 Rejected на MVP: research-level, нет production users. *Watch-list* для multi-tenant SaaS future.
 
+### Alternative 8: SQL-first coordination (обязательный Postgres в MVP)
+
+Исходная позиция ADR-001 (до v4.1) — Postgres как обязательный backend для metadata и mount-lock'а (шаблон Harbor / Quay / GitLab Container Registry). Rejected в v4.1 для MVP: operational overhead (docker-compose + миграции + connection pool), disaster-recovery усложняется (потеря БД = потеря identity), solo/small-team use-cases реально не требуют strong lock. **Сохранено как `PostgresCoordination` extension-backend** — см. [ADR-002](ADR-002-cooperative-coordination.md). Redis — аналогично, `RedisCoordination` extension, а не обязательная зависимость.
+
 ## Implementation
+
+Полный, обновляемый plan с недельной декомпозицией и testing-плана — в [IMPLEMENTATION_PLAN.md](../../IMPLEMENTATION_PLAN.md). Нижеследующий список фиксирует high-level фазы для ADR.
 
 ### Phase 0 — Research & design pivot ✅ (2026-04-22)
 - [RESEARCH-002](../research/RESEARCH-002-crdt-fs-space.md) CRDT-FS → pivot в fork-merge.
 - [RESEARCH-003](../research/RESEARCH-003-layered-bucket-storage.md) CDC + OCI + merge + intent + compaction.
 - [RESEARCH-004](../research/RESEARCH-004-rustfs-oci-coordination.md) RustFS+S3 + OCI implementation + MAST coordination.
-- Spike v1 в `spikes/lofs/` — валидирован CAS + OpenDAL + property-test approach.
+- [RESEARCH-005](../research/RESEARCH-005-rust-oci-ecosystem.md) Rust OCI ecosystem map.
+- [RESEARCH-006](../research/RESEARCH-006-oss-prior-art.md) Competitive landscape.
+- [ADR-002](ADR-002-cooperative-coordination.md) — pivot к OCI-only cooperative coordination.
 
-### Phase 1 — Core primitives + storage layer (3 недели)
-- Rust crate `lofs-core`:
-  - BlobStore через OpenDAL (hot MinIO + cold S3).
-  - FastCDC chunker (v2020) + content-type profiles.
-  - Pack writer (zstd:chunked, 16 MiB target) + zTOC.
-  - Tree (canonical CBOR), Snapshot (Merkle-DAG).
-  - Bucket (head + TTL + ACL).
-- Property tests: determinism, immutability, chunk-level dedup.
+### Phase 1 — L0 MVP (4 MCP tools over OCI, ~6 недель)
 
-### Phase 2 — MCP tools + OCI wire format (3 недели)
-- Rust crate `lofs-mcp` в `devboy-tools` plugin system.
-- Tools: `bucket.*`, `snap.*`, `ws.read/ls/blame`, `fork.*`.
-- OCI artifact serialization (`oci-client` + `oci-spec`).
-- Custom media types + Referrers API support.
-- Integration DevBoy OIDC + ACL + Redis pub/sub.
+Разделено на подфазы в [IMPLEMENTATION_PLAN.md](../../IMPLEMENTATION_PLAN.md):
 
-### Phase 3 — Merge engine + review tools (3 недели)
-- `MergeStrategy` trait + 4-tier ladder.
-- Mergiraf subprocess integration (exec-boundary для GPL).
-- Weave integration (feature flag, early-adopter).
-- `merge.propose/auto_resolve/review/suggest/override/audit_decisions/dry_run/execute/recover`.
-- 8-tool merge-agent toolset (formal schema).
-- Quarantine механика.
-- Binary-no-diff policy enforcement.
+- **1.1 (week 1-2)** — dev env (docker-compose Zot), CLI skeleton, `lofs.create` + `lofs.list` через registry manifest annotations.
+- **1.2 (week 3-4)** — `lofs.mount` rw / ro + `lofs.unmount` commit / discard через intent-manifests + rootless overlay (fuser + libfuse-fs + ocirender).
+- **1.3 (week 5)** — path-scoped writes + rich `MountAdvisory` + heartbeat loop + stale-intent GC.
+- **1.4 (week 6)** — hardening, observability, benchmark Zot vs GitLab Container Registry, v0.1.0 release.
 
-### Phase 4 — Intent lifecycle + HITL + SubMount (3 недели)
-- Intent state machine (7 states) + heartbeat (Postgres + Redis).
-- 10 intent.* MCP tools.
-- Max-hop enforcement, negotiation max 2 rounds, dual-LLM drift-detection.
-- SubMount через OCI subject-references (Referrers API).
-- HITL hooks: `.lofs.toml` approval policy, interrupt на merge/delete/publish.
-- DevBoy UI integration (pending-approval queue).
+### Phase 2+ — L1-L7 evolution (data-driven)
 
-### Phase 5 — Audit, publish, share (2 недели)
-- Audit log в S3 parquet + DuckDB query endpoint.
-- `publish.freeze` → OCI artifact push (Zot target).
-- `publish.import` → OCI artifact pull.
-- cosign sign/verify integration.
-- `ws.blame` через audit query.
+Активируется **по метрикам**, а не по календарю. Каждый layer — это feature-flag + extension crate + миграция, не breaking change core'а.
 
-### Phase 6 — FUSE adapter (opt-in, 1-2 недели)
-- `ofs`-based read-only mount для convenience.
-- Write-through MCP API (не прямая FS-запись).
-- Lazy materialization via tree → pack Range-GET.
-
-### Phase 7 — Cold-tier compaction + summarizer (2 недели)
-- Tiered retention (hot/warm/cold) implementation.
-- Bookmarks с TTL protection.
-- Cold-tier summarizer crate (`lofs-summarizer`).
-- Ed25519-signed summaries + Merkle chain.
-- Embedding generation + Qdrant index.
-- `history.narrative/semantic_search/retrieve_archive`.
+| Layer | Планируемые компоненты | Что триггерит |
+|-------|------------------------|---------------|
+| **L1** | Merge engine (4-tier ladder, Mergiraf subprocess), fork+merge surface, `RedisCoordination` | fork+merge workflow adoption, 20+ concurrent rw |
+| **L2** | Per-file BLAKE3 dedup + reference-counting GC, `PostgresCoordination` + audit triggers | storage cost > threshold, compliance requirement |
+| **L3** | FastCDC + pack-files (zstd:chunked) + zTOC lookup, OpenDAL blob backend | dedup ratio < 2× на L2 |
+| **L4** | SOCI-style lazy pull + Range-GET для partial reads | reads of partial large files |
+| **L5** | Hot/cold tiering (MinIO → S3 IA → Glacier), bookmark mechanism, publish/import cosign | долгоживущие archives |
+| **L6** | Cold-tier summarizer (Ed25519-signed summaries, Merkle chain), semantic search | agent confusion в длинной истории |
+| **L7** | HITL hooks (`.lofs.toml` approval policy, interrupt на merge/delete/publish, DevBoy UI integration) | первый инцидент от auto-merge |
 
 ### Phase 8 — Hardening + observability (2 недели)
 - Pack-reorganize (GC + repack).
@@ -682,17 +744,24 @@ Rejected на MVP: research-level, нет production users. *Watch-list* для 
 - Adversarial input fuzzing.
 - Spike #5 (hot-tier choice) + Spike #6 (OCI roundtrip) + Spike #7 (MAST injection).
 
-**Total realistic:** 16-19 недель с учётом всех подсистем и spikes. CRDT-вариант был бы ~24+ недель.
+**Total realistic:**
+- **L0 MVP (v0.1.0):** ~6 недель.
+- **L1-L7 evolution:** 16-19 недель cumulative, **но только по активации**. Многие layer'ы могут никогда не понадобиться.
 
-- **Задачи:** декомпозиция в ClickUp после ADR acceptance.
-- **Код:** `external/devboy-tools/crates/lofs-*` (OSS Apache 2.0).
+- **Задачи:** декомпозиция в [IMPLEMENTATION_PLAN.md](../../IMPLEMENTATION_PLAN.md) + GitHub issues per phase.
+- **Код:** `meteora-pro/lofs` (OSS Apache 2.0), сабмодуль в DevBoy monorepo.
 
 ## References
 
+### Related ADRs
+- [ADR-002: Cooperative Coordination Model](ADR-002-cooperative-coordination.md) — OCI-only intent-manifest coordination, extension backends (Redis/Postgres).
+
 ### Research documents
 - [RESEARCH-002: CRDT-FS space](../research/RESEARCH-002-crdt-fs-space.md) — исходная motivation для pivot.
-- [RESEARCH-003: Layered bucket storage](../research/RESEARCH-003-layered-bucket-storage.md) — CDC + OCI + merge + intent + compaction.
-- [RESEARCH-004: RustFS+S3 + OCI + coordination](../research/RESEARCH-004-rustfs-oci-coordination.md) — RustFS maturity + OCI implementation + MAST.
+- [RESEARCH-003: Layered bucket storage](../research/RESEARCH-003-layered-bucket-storage.md) — CDC + OCI + merge + intent + compaction (L3+ reference).
+- [RESEARCH-004: RustFS+S3 + OCI + coordination](../research/RESEARCH-004-rustfs-oci-coordination.md) — RustFS maturity + OCI implementation + MAST (historical; coordination section superseded by ADR-002).
+- [RESEARCH-005: Rust OCI ecosystem](../research/RESEARCH-005-rust-oci-ecosystem.md) — library selection для L0.
+- [RESEARCH-006: OSS prior-art](../research/RESEARCH-006-oss-prior-art.md) — competitive landscape.
 
 ### Storage
 - [FastCDC USENIX ATC'16](https://www.usenix.org/system/files/conference/atc16/atc16-paper-xia.pdf)
@@ -760,3 +829,4 @@ Rejected на MVP: research-level, нет production users. *Watch-list* для 
 | 2026-04-22 | Andrey Maznyak | **v3.2 — RESEARCH-004 integration**: hot-tier plural (MinIO primary, RustFS когда GA, SeaweedFS alt) — RustFS alpha state blocker; formal OCI wire formats (`vnd.meteora.lofs.*`); publish/import через OCI artifacts (Zot primary); intent lifecycle formal 7-state + heartbeat 60s/TTL 5min + max-hop 3 + negotiation 2 rounds; HITL hooks first-class (`.lofs.toml` approval policy, interrupt на merge/delete/publish, GitHub Copilot Workspace pattern); SubMount через OCI subject-references; cosign integration для shareable snapshots; MAST taxonomy как Phase 8 test-matrix; pack size 16 MiB (aligned с RustFS 1 MiB RS blocks); zstd-3 hot / zstd-19 archive; chunk profiles (code/mixed/binary auto); ADS deadlock mitigation; 3 новых spike (#5 hot-tier choice, #6 OCI roundtrip, #7 MAST injection). Phase-plan 16-19 недель. |
 | 2026-04-22 | Andrey Maznyak | **v3.5 — L0 pivot (mount/unmount)**: radical simplification. Вместо 40+ MCP tools — **4 тула L0**: `lofs.create / list / mount / unmount`. Агент получает обычный POSIX-путь (`/mnt/lofs/<session>`), работает любыми инструментами (cat, grep, cargo, git). Commit = OCI layer. Evolution L1-L7 только по data-driven триггерам. Backend: Buildah/libfuse-fs/ocirender для rootless overlay (RESEARCH-005). Весь "продвинутый" feature-set (CDC packs, intent lifecycle, tiered retention, HITL) отодвинут в L3+, per metrics. |
 | 2026-04-22 | Andrey Maznyak | **v4 — LOFS naming + OSS repo**: renamed `bucket-teleport` / `CTXFS` → **LOFS (Layered Overlay File System)** после проверки availability (crates.io + lofs.dev free, минорные non-conflict). Pair с LOKB (Local Offline Knowledge Base) как Meteora family. Этот ADR перенесён в public repo `meteora-pro/lofs` как ADR-001. [RESEARCH-006](../research/RESEARCH-006-oss-prior-art.md) интегрирован: gap narrower чем initially казалось, differentiator = LLM-driven merge as first-class MCP primitive + OCI-artifact interop. Closest competitors: Cloudflare Project Think + Artifacts, ConTree (Nebius), Daytona. |
+| 2026-04-22 | Andrey Maznyak | **v4.1 — coordination pivot, L0 cleanup**: OCI-реестр — единственный обязательный backend; SQL/Redis вынесены в опциональные `Coordination` extensions ([ADR-002](ADR-002-cooperative-coordination.md)). Decision section переписан: L0 MVP = 4 MCP tools (`lofs.create/list/mount/unmount`) + intent-manifest cooperative coordination + path-scoped writes. CDC + pack-files, Merge engine, Intent lifecycle (7-state), HITL hooks, Tiered retention, AI-summaries — явно помечены как L1-L7 future evolution, активация по data-driven триггерам. Engineering stack разделён на L0 (OCI + FUSE + tokio) и L1-L7 (opt-in). Storage layout упрощён: один OCI repo per bucket, никаких локальных state-files. Implementation phases сокращены до Phase 1 (L0, ~6 недель) + Phase 2+ (data-driven activation). Offline-capable: локальный Zot делает single-host deployment fully offline. |

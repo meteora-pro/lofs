@@ -10,6 +10,8 @@ related_adrs: ["ADR-001"]
 
 > Углубление [RESEARCH-003](RESEARCH-003-layered-bucket-storage.md) по трём направлениям, где первая итерация дала overview, а не implementation-level детали. Production-focus 2025–2026.
 
+> ⚠️ **Historical note (2026-04-22, v4.1):** разделы про **multi-agent coordination** (Postgres-canonical + Redis-active, intent lifecycle 7 states, MAST failure modes) **superseded by [ADR-002: Cooperative Coordination Model](../adr/ADR-002-cooperative-coordination.md)**. L0 MVP использует OCI-only координацию через intent manifests (Referrers API); Postgres / Redis — опциональные extension-backends, не default. Секции про RustFS+S3 hot/cold tiering отложены в L5+ evolution roadmap ([ADR-001](../adr/ADR-001-lofs.md) §L0 vs L1-L7 scope). Содержание ниже сохранено как исторический срез проработанного дизайна для активации future layers.
+
 ---
 
 ## Направление 1 — RustFS hot + S3 mirror cold

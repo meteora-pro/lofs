@@ -10,6 +10,8 @@ related_adrs: ["ADR-001"]
 
 > Production-focused research для lofs-daemon — что можно переиспользовать vs писать самим.
 
+> ℹ️ **Status note (2026-04-22, v4.1):** выводы этого документа остаются актуальны для L0 MVP ([ADR-001](../adr/ADR-001-lofs.md)) — `oci-spec`, `oci-client`, `fuser` + `libfuse-fs` + `ocirender`, sync `tar` + `zstd`. Секции про Postgres/SQL в backend — superseded by [ADR-002](../adr/ADR-002-cooperative-coordination.md): L0 не использует БД, `sqlx` — optional extension dependency. См. также §6.4 и §6.7 в [IMPLEMENTATION_PLAN.md](../../IMPLEMENTATION_PLAN.md) для обновлённой матрицы "что в L0 / что в L1+".
+
 ---
 
 ## Executive summary
