@@ -16,7 +16,7 @@ use oci_client::client::{Config, ImageLayer};
 use oci_client::manifest::{OciDescriptor, OciImageManifest};
 use serde::{Deserialize, Serialize};
 
-use super::media_types::{ANNOTATION_NS, BUCKET_ARTIFACT_TYPE, BUCKET_CONFIG_V1, CONFIG_MEDIA_TYPE};
+use super::media_types::{ANNOTATION_NS, BUCKET_CONFIG_V1, CONFIG_MEDIA_TYPE};
 use crate::bucket::{Bucket, BucketId, BucketName, BucketStatus};
 use crate::error::{LofsError, LofsResult};
 

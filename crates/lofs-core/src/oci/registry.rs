@@ -231,10 +231,10 @@ impl OciRegistry {
             })?;
 
         let annotations = manifest.annotations.unwrap_or_default();
-        if annotations.contains_key(&format!("{ANNOTATION_NS}.bucket_id")) {
-            if let Ok(b) = bucket_from_annotations(&annotations) {
-                return Ok(b);
-            }
+        if annotations.contains_key(&format!("{ANNOTATION_NS}.bucket_id"))
+            && let Ok(b) = bucket_from_annotations(&annotations)
+        {
+            return Ok(b);
         }
 
         self.pull_bucket_from_config_blocking(&reference, &manifest.config.digest)
@@ -391,7 +391,11 @@ impl OciRegistry {
         );
         // `list_tags` deserialises `{ "tags": null }` (empty repo) as a
         // parse error — catch it and return an empty tag list instead.
-        let tags_resp = match self.client.list_tags(&reference, &self.auth, None, None).await {
+        let tags_resp = match self
+            .client
+            .list_tags(&reference, &self.auth, None, None)
+            .await
+        {
             Ok(r) => r,
             Err(e) if is_manifest_not_found(&e) => return Ok(Vec::new()),
             Err(OciDistributionError::GenericError(msg)) => {
@@ -506,9 +510,7 @@ impl OciRegistry {
         url: &str,
         reference: &Reference,
     ) -> LofsResult<reqwest::Response> {
-        let first = apply_auth(self.http.delete(url), &self.auth)
-            .send()
-            .await?;
+        let first = apply_auth(self.http.delete(url), &self.auth).send().await?;
         if first.status() != StatusCode::UNAUTHORIZED {
             return Ok(first);
         }
@@ -560,8 +562,10 @@ fn encode_shared_tag(org_seg: &str, name: &str) -> LofsResult<String> {
 /// next in `list_manifests_shared` anyway), but a conservative filter
 /// avoids pulling manifests for obviously-unrelated tags sitting in the
 /// same repo (e.g. actual container images). A LOFS tag is one of:
-///   - `<name>`       — personal bucket (no dot)
-///   - `<org>.<name>` — org-scoped bucket (exactly one dot)
+///
+/// - `<name>` — personal bucket (no dot)
+/// - `<org>.<name>` — org-scoped bucket (exactly one dot)
+///
 /// Anything that isn't shaped like a valid `BucketName` pair is skipped.
 fn looks_like_bucket_tag(tag: &str) -> bool {
     match tag.split_once('.') {
@@ -732,9 +736,8 @@ mod tests {
 
     #[test]
     fn shared_reference_folds_identity_into_tag() {
-        let reg =
-            OciRegistry::anonymous("https://registry.gitlab.com/andreymaznyak/lofs-testbed")
-                .unwrap();
+        let reg = OciRegistry::anonymous("https://registry.gitlab.com/andreymaznyak/lofs-testbed")
+            .unwrap();
 
         let r = reg
             .reference_for_components("teleport-demo", Some("meteora"))
@@ -742,9 +745,7 @@ mod tests {
         assert_eq!(r.repository(), "andreymaznyak/lofs-testbed");
         assert_eq!(r.tag(), Some("meteora.teleport-demo"));
 
-        let r = reg
-            .reference_for_components("teleport-demo", None)
-            .unwrap();
+        let r = reg.reference_for_components("teleport-demo", None).unwrap();
         assert_eq!(r.repository(), "andreymaznyak/lofs-testbed");
         assert_eq!(r.tag(), Some("teleport-demo"));
     }
