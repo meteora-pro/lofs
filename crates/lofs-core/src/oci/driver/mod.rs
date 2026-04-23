@@ -32,6 +32,7 @@ use oci_client::Reference;
 use oci_client::client::Client;
 use oci_client::secrets::RegistryAuth;
 
+use super::rate_limit::HttpLimiter;
 use super::registry::RepoMode;
 use crate::error::LofsResult;
 
@@ -67,6 +68,11 @@ pub struct DeleteContext<'a> {
     /// that need to call a registry-specific native API on top of the
     /// bare OCI surface (GitLab: `/api/v4/projects/:prefix/...`).
     pub path_prefix: &'a str,
+    /// Shared HTTP rate-limit gate. Drivers should wrap outbound
+    /// `.send()` calls in `limiter.retry_on_429(..)` to inherit the
+    /// same concurrency / backoff policy the rest of `OciRegistry`
+    /// already uses.
+    pub limiter: &'a HttpLimiter,
 }
 
 /// Per-driver HTTP concurrency + backoff settings.

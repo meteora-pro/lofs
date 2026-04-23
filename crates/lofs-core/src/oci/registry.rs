@@ -55,6 +55,7 @@ use super::manifest::{
     BucketConfig, ListedManifest, bucket_annotations, bucket_from_annotations, build_pair,
 };
 use super::media_types::{ANNOTATION_NS, BUCKET_CONFIG_V1};
+use super::rate_limit::HttpLimiter;
 use crate::bucket::{Bucket, BucketName};
 use crate::error::{LofsError, LofsResult};
 
@@ -103,6 +104,9 @@ pub struct OciRegistry {
     /// caller passed just a bare host URL.
     path_prefix: String,
     driver: DriverRef,
+    /// HTTP rate-limit gate derived from the driver's policy. Every
+    /// outbound HTTP call acquires a permit for its duration.
+    rate_limit: HttpLimiter,
     auth: RegistryAuth,
 }
 
@@ -147,6 +151,7 @@ impl OciRegistry {
             protocol,
             ..Default::default()
         });
+        let rate_limit = HttpLimiter::new(driver.rate_limit_policy());
         Ok(Self {
             client,
             http: reqwest::Client::new(),
@@ -154,6 +159,7 @@ impl OciRegistry {
             registry_host: parsed.host,
             path_prefix: parsed.path_prefix,
             driver,
+            rate_limit,
             auth: RegistryAuth::Anonymous,
         })
     }
@@ -207,8 +213,12 @@ impl OciRegistry {
 
     /// Ping the registry's `/v2/` endpoint.
     pub async fn ping(&self) -> LofsResult<()> {
+        let _permit = self.rate_limit.acquire().await;
         let url = format!("{}/v2/", self.origin);
-        let res = self.http.get(&url).send().await?;
+        let res = self
+            .rate_limit
+            .retry_on_429(|| self.http.get(&url).send())
+            .await?;
         let code = res.status();
         if code.is_success() || code == StatusCode::UNAUTHORIZED {
             Ok(())
@@ -225,6 +235,7 @@ impl OciRegistry {
     pub async fn push_bucket(&self, bucket: &Bucket) -> LofsResult<String> {
         let (config, manifest) = build_pair(bucket)?;
         let reference = self.reference_for(bucket)?;
+        let _permit = self.rate_limit.acquire().await;
         let resp = self
             .client
             .push(&reference, &[], config, &self.auth, Some(manifest))
@@ -235,6 +246,7 @@ impl OciRegistry {
     /// Pull a bucket by name + org.
     pub async fn pull_bucket(&self, name: &BucketName, org: Option<&str>) -> LofsResult<Bucket> {
         let reference = self.reference_for_components(name.as_str(), org)?;
+        let _permit = self.rate_limit.acquire().await;
         let (manifest, _raw_json) = self
             .client
             .pull_image_manifest(&reference, &self.auth)
@@ -282,18 +294,22 @@ impl OciRegistry {
     /// Delete a bucket: fetch the manifest digest, then issue DELETE.
     pub async fn delete_bucket(&self, name: &BucketName, org: Option<&str>) -> LofsResult<()> {
         let reference = self.reference_for_components(name.as_str(), org)?;
-        let digest = self
-            .client
-            .fetch_manifest_digest(&reference, &self.auth)
-            .await
-            .map_err(|e| {
-                if is_manifest_not_found(&e) {
-                    LofsError::NotFound(display_bucket(name, org))
-                } else {
-                    LofsError::Registry(e.to_string())
-                }
-            })?;
 
+        let digest = {
+            let _permit = self.rate_limit.acquire().await;
+            self.client
+                .fetch_manifest_digest(&reference, &self.auth)
+                .await
+                .map_err(|e| {
+                    if is_manifest_not_found(&e) {
+                        LofsError::NotFound(display_bucket(name, org))
+                    } else {
+                        LofsError::Registry(e.to_string())
+                    }
+                })?
+        };
+
+        let _permit = self.rate_limit.acquire().await;
         let ctx = DeleteContext {
             http: &self.http,
             oci: &self.client,
@@ -302,6 +318,7 @@ impl OciRegistry {
             digest: &digest,
             auth: &self.auth,
             path_prefix: &self.path_prefix,
+            limiter: &self.rate_limit,
         };
         let res = self.driver.delete_manifest(&ctx).await?;
         match res.status() {
@@ -449,6 +466,7 @@ impl OciRegistry {
         reference: &Reference,
         digest: &str,
     ) -> LofsResult<Bucket> {
+        let _permit = self.rate_limit.acquire().await;
         let mut buf: Vec<u8> = Vec::new();
         self.client
             .pull_blob(reference, digest, &mut buf)
@@ -462,7 +480,11 @@ impl OciRegistry {
         let mut out = Vec::new();
         let mut next = format!("{}/v2/_catalog?n=200", self.origin);
         loop {
-            let res = self.authorised_get(&next).await?;
+            let _permit = self.rate_limit.acquire().await;
+            let res = self
+                .rate_limit
+                .retry_on_429(|| apply_auth(self.http.get(&next), &self.auth).send())
+                .await?;
             let status = res.status();
             if !status.is_success() {
                 return Err(LofsError::Registry(format!(
@@ -490,6 +512,7 @@ impl OciRegistry {
             repo.to_string(),
             tag.to_string(),
         );
+        let _permit = self.rate_limit.acquire().await;
         let (manifest, digest) = self
             .client
             .pull_image_manifest(&reference, &self.auth)
@@ -512,12 +535,6 @@ impl OciRegistry {
                 .unwrap_or_else(|| BUCKET_CONFIG_V1.to_string()),
             annotations,
         })
-    }
-
-    async fn authorised_get(&self, url: &str) -> LofsResult<reqwest::Response> {
-        let req = self.http.get(url);
-        let req = apply_auth(req, &self.auth);
-        Ok(req.send().await?)
     }
 }
 

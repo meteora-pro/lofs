@@ -50,7 +50,14 @@ pub(crate) async fn perform_native_delete(
         ctx.digest
     );
 
-    let first = apply_auth(ctx.http.delete(&url), ctx.auth).send().await?;
+    // First attempt — Basic/Bearer from the caller's credentials. On
+    // registries that are content with that (Zot, Distribution), we're
+    // done here. `retry_on_429` handles any rate-limit pushback along
+    // the way.
+    let first = ctx
+        .limiter
+        .retry_on_429(|| apply_auth(ctx.http.delete(&url), ctx.auth).send())
+        .await?;
     if first.status() != StatusCode::UNAUTHORIZED {
         return Ok(first);
     }
@@ -64,7 +71,10 @@ pub(crate) async fn perform_native_delete(
         .map_err(|e| LofsError::Registry(format!("token exchange for DELETE: {e}")))?;
 
     match maybe_jwt {
-        Some(jwt) => Ok(ctx.http.delete(&url).bearer_auth(jwt).send().await?),
+        Some(jwt) => Ok(ctx
+            .limiter
+            .retry_on_429(|| ctx.http.delete(&url).bearer_auth(jwt.clone()).send())
+            .await?),
         None => Ok(first),
     }
 }

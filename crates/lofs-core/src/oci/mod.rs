@@ -10,6 +10,7 @@
 pub mod driver;
 pub mod manifest;
 pub mod media_types;
+pub mod rate_limit;
 pub mod registry;
 
 pub use driver::{
@@ -18,4 +19,5 @@ pub use driver::{
 };
 pub use manifest::{BucketConfig, ListedManifest, bucket_annotations, bucket_from_annotations};
 pub use media_types::{ANNOTATION_NS, BUCKET_CONFIG_V1, INTENT_MANIFEST_V1, SNAPSHOT_MANIFEST_V1};
+pub use rate_limit::{HttpLimiter, HttpPermit};
 pub use registry::{HEAD_TAG, NAMESPACE, OciRegistry, PERSONAL_ORG_SEGMENT, RepoMode};

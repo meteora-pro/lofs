@@ -157,7 +157,7 @@ impl RegistryDriver for GitLabDriver {
         let registry_host = ctx.reference.registry().to_string();
         let api_base = GitLabApi::derive_from_registry_host(&registry_host);
         let api_auth = api_auth_from(ctx.auth)?;
-        let api = GitLabApi::new(api_base, api_auth);
+        let api = GitLabApi::new(api_base, api_auth, ctx.limiter.clone());
 
         let (project_id, repo_id) = self.resolve(&api, ctx.path_prefix).await?;
 

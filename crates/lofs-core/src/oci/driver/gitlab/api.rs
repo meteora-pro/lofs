@@ -14,6 +14,7 @@
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
 
+use super::super::super::rate_limit::HttpLimiter;
 use crate::error::{LofsError, LofsResult};
 
 /// Stateless GitLab API client. Constructed per-operation — no persistent
@@ -26,6 +27,10 @@ pub struct GitLabApi {
     /// `https://gitlab.com/api/v4`. NOT the registry host.
     api_base: String,
     auth: ApiAuth,
+    /// Same rate-limit policy the caller uses for its OCI calls, so a
+    /// `lofs rm` burst honours the same concurrency + `Retry-After`
+    /// behaviour as pulls/pushes.
+    limiter: HttpLimiter,
 }
 
 /// Auth method for API calls. GitLab accepts PATs via `PRIVATE-TOKEN`
@@ -45,11 +50,12 @@ pub enum ApiAuth {
 
 impl GitLabApi {
     /// Build an API client talking to `api_base` (e.g. `https://gitlab.com/api/v4`).
-    pub fn new(api_base: impl Into<String>, auth: ApiAuth) -> Self {
+    pub fn new(api_base: impl Into<String>, auth: ApiAuth, limiter: HttpLimiter) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_base: api_base.into(),
             auth,
+            limiter,
         }
     }
 
@@ -73,8 +79,10 @@ impl GitLabApi {
             self.api_base,
             urlencoding_encode_slashes(path)
         );
-        let req = self.auth_headers(self.http.get(&url));
-        let resp = req.send().await?;
+        let resp = self
+            .limiter
+            .retry_on_429(|| self.auth_headers(self.http.get(&url)).send())
+            .await?;
         let status = resp.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Err(LofsError::NotFound(format!("project `{path}`")));
@@ -101,8 +109,10 @@ impl GitLabApi {
             "{}/projects/{project_id}/registry/repositories?per_page=100",
             self.api_base
         );
-        let req = self.auth_headers(self.http.get(&url));
-        let resp = req.send().await?;
+        let resp = self
+            .limiter
+            .retry_on_429(|| self.auth_headers(self.http.get(&url)).send())
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -125,8 +135,10 @@ impl GitLabApi {
             "{}/projects/{project_id}/registry/repositories/{repo_id}/tags/{tag}",
             self.api_base
         );
-        let req = self.auth_headers(self.http.delete(&url));
-        let resp = req.send().await?;
+        let resp = self
+            .limiter
+            .retry_on_429(|| self.auth_headers(self.http.delete(&url)).send())
+            .await?;
         let status = resp.status();
         if !status.is_success() && status != reqwest::StatusCode::NO_CONTENT {
             let body = resp.text().await.unwrap_or_default();
